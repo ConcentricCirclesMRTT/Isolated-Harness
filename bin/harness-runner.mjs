@@ -10,6 +10,7 @@ import { buildCodexContainerPlan } from '../src/adapters/codex.mjs';
 import { defaultStateRoot, startCodexRun } from '../src/run.mjs';
 import { resolveCapabilities } from '../src/capabilities.mjs';
 import { buildEnvironment, listEnvironmentPresets, listEnvironments, presetEnvironmentSpec, resetEnvironment } from '../src/environments.mjs';
+import { importRuntime, listRuntimes } from '../src/runtimes.mjs';
 
 const [command, subcommand, ...arguments_] = process.argv.slice(2);
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -22,6 +23,8 @@ const usage = `Usage:
   harness-runner environment prebuild [preset ...]
   harness-runner environment list
   harness-runner environment reset <name>
+  harness-runner runtime import --name <name> --source <directory> [--with-cache]
+  harness-runner runtime list
   harness-runner chat send <chat-id> <workspace-directory> <message...>
   harness-runner chat inspect <chat-id>`;
 const emit = event => process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -59,6 +62,17 @@ async function environmentSpecPath(args) {
   if (args[0] !== '--spec' || !args[1] || args.length !== 2) throw new Error(usage);
   return args[1];
 }
+function runtimeImportOptions(args) {
+  const options = { includeCache: false };
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--name') options.name = args[++index];
+    else if (args[index] === '--source') options.source = args[++index];
+    else if (args[index] === '--with-cache') options.includeCache = true;
+    else throw new Error(usage);
+  }
+  if (!options.name || !options.source) throw new Error(usage);
+  return options;
+}
 try {
   if (command === 'image' && subcommand === 'build') await buildImage(imageBuildOptions(arguments_));
   else if (command === 'environment' && subcommand === 'build') emit({ type: 'environment_built', ...(await buildEnvironment(await environmentSpecPath(arguments_))) });
@@ -73,6 +87,8 @@ try {
     if (!arguments_[0] || arguments_.length !== 1) throw new Error(usage);
     emit({ type: 'environment_reset', ...(await resetEnvironment(arguments_[0])) });
   }
+  else if (command === 'runtime' && subcommand === 'import') emit({ type: 'runtime_imported', ...(await importRuntime(runtimeImportOptions(arguments_))) });
+  else if (command === 'runtime' && subcommand === 'list') emit({ type: 'runtimes', runtimes: await listRuntimes() });
   else if (command === 'chat' && subcommand === 'send') {
     const [chatId, workspace, ...messageParts] = arguments_;
     const task = messageParts.join(' ').trim();

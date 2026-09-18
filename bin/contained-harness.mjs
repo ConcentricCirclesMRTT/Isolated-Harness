@@ -4,12 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { startInteractiveCodex } from '../src/interactive.mjs';
 
 const usage = `Usage:
-  isolated-harness codex --workspace <directory> [--skills inherited|none|<skill-dir>]... [--config <config.toml>] [--session <id>] [--environment <name>] [--offline] [--image <image>] [-- <codex CLI args...>]
+  isolated-harness codex --workspace <directory> [--skills inherited|none|<skill-dir>]... [--config <config.toml>] [--session <id>] [--environment <name>] [--runtime <name>] [--offline] [--image <image>] [-- <codex CLI args...>]
   isolated-harness image build [tag]
   isolated-harness environment <build|list|reset> ...
+  isolated-harness runtime <import|list> ...
 
 Everything after -- is forwarded unchanged to the real Codex CLI in the container.`;
-const runnerCommands = new Set(['image', 'environment', 'preflight', 'plan', 'run', 'chat']);
+const runnerCommands = new Set(['image', 'environment', 'runtime', 'preflight', 'plan', 'run', 'chat']);
 
 function parse(argv) {
   if (argv[0] !== 'codex') throw new Error(usage);
@@ -22,6 +23,7 @@ function parse(argv) {
     else if (value === '--config') options.configPath = argv[++index];
     else if (value === '--session') options.sessionId = argv[++index];
     else if (value === '--environment') options.environmentName = argv[++index];
+    else if (value === '--runtime') options.runtimeName = argv[++index];
     else if (value === '--image') options.image = argv[++index];
     else if (value === '--offline') options.profile = 'offline';
     else throw new Error(`Unknown isolated-harness option: ${value}\n\n${usage}`);

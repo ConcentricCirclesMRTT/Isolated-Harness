@@ -2,5 +2,6 @@
   "version": "v1",
   "name": "browser-review-v1",
   "baseImage": "codex-cli:local",
-  "playwright": ["chromium"]
+  "playwright": ["chromium"],
+  "workspaceRuntime": true
 }

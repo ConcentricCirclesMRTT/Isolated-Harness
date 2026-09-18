@@ -31,6 +31,36 @@ to `PATH` for the agent.
 selected browser binaries and their Linux runtime dependencies into the image
 at build time. Selecting a browser also adds the Python `playwright` package.
 
+Browser-oriented presets also expose a disposable compatibility path at
+`/workspace/runtime`: `venv` links to the image's Python environment and
+`browsers` links to the preinstalled Playwright browser directory. It is a
+tmpfs mount for the current container, so it does not create or retain a
+`runtime/` directory in the host workspace. This supports Skills that expect
+`/workspace/runtime/venv/bin/python` and
+`PLAYWRIGHT_BROWSERS_PATH=/workspace/runtime/browsers`.
+
+## Reuse a runtime produced by a workspace
+
+When an agent has already assembled a Linux runtime in a workspace, import it
+once as a managed artifact and mount it read-only into later workspaces. The
+artifact keeps the compatible `/workspace/runtime` container path, which also
+preserves virtual-environment symlinks that use that absolute path.
+
+```sh
+isolated-harness runtime import --name drawing-runtime --source /path/to/workspace/runtime
+isolated-harness codex --workspace /path/to/new-project --environment drawing-review-v1 --runtime drawing-runtime
+```
+
+The default import retains executable runtime entries such as `browsers`,
+`python`, `venv`, `uv-arm`, and `uv-wheel`, but deliberately omits a mutable
+download `cache/`. Pass `--with-cache` only when that cache is needed for a
+separate build workflow. Managed runtime artifacts are Linux-container assets,
+not macOS executables; they are mounted read-only and are never copied into the
+new project's workspace. A small tmpfs overlay records Playwright's local
+installation link while the imported browser binaries remain read-only; an
+idempotent `playwright install chromium` therefore reuses the browser without
+redownloading it.
+
 ## Bundled environments
 
 The package includes four reviewed presets. They are ordinary local Docker

@@ -24,18 +24,19 @@ function normalizeStringList(value, name, matcher) {
 
 export function parseEnvironmentSpec(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) reject('ENVIRONMENT_SPEC_INVALID', 'Environment spec must be a JSON object.');
-  const allowed = new Set(['version', 'name', 'baseImage', 'apt', 'pip', 'playwright', 'trustedCaFile']);
+  const allowed = new Set(['version', 'name', 'baseImage', 'apt', 'pip', 'playwright', 'workspaceRuntime', 'trustedCaFile']);
   for (const key of Object.keys(raw)) if (!allowed.has(key)) reject('ENVIRONMENT_SPEC_UNKNOWN_FIELD', `Unknown environment field: ${key}`);
   if (raw.version !== 'v1') reject('ENVIRONMENT_SPEC_VERSION', 'Environment spec version must be "v1".');
   if (typeof raw.name !== 'string' || !environmentName.test(raw.name)) reject('ENVIRONMENT_NAME_INVALID', 'Environment name must use lowercase letters, digits, dots, underscores, or dashes.');
   if (typeof raw.baseImage !== 'string' || !imageName.test(raw.baseImage)) reject('ENVIRONMENT_BASE_IMAGE_INVALID', 'baseImage must be a safe Docker image reference.');
+  if (raw.workspaceRuntime !== undefined && typeof raw.workspaceRuntime !== 'boolean') reject('ENVIRONMENT_RUNTIME_INVALID', 'workspaceRuntime must be a boolean.');
   if (raw.trustedCaFile !== undefined && (typeof raw.trustedCaFile !== 'string' || !raw.trustedCaFile.startsWith('/'))) reject('ENVIRONMENT_CA_INVALID', 'trustedCaFile must be an absolute PEM file path.');
   const apt = normalizeStringList(raw.apt, 'apt', aptPackage);
   const playwright = raw.playwright === undefined ? [] : raw.playwright;
   if (!Array.isArray(playwright) || playwright.some(browser => typeof browser !== 'string' || !playwrightBrowser.has(browser))) reject('ENVIRONMENT_PLAYWRIGHT_INVALID', 'playwright may contain only chromium, firefox, or webkit.');
   const pip = normalizeStringList(raw.pip, 'pip', pipRequirement);
   if (playwright.length && !pip.some(requirement => requirement.split('==')[0] === 'playwright')) pip.push('playwright');
-  return { version: 'v1', name: raw.name, baseImage: raw.baseImage, apt, pip: pip.sort(), playwright: [...new Set(playwright)].sort(), trustedCaFile: raw.trustedCaFile };
+  return { version: 'v1', name: raw.name, baseImage: raw.baseImage, apt, pip: pip.sort(), playwright: [...new Set(playwright)].sort(), workspaceRuntime: raw.workspaceRuntime ?? false, trustedCaFile: raw.trustedCaFile };
 }
 
 export async function loadEnvironmentSpec(path) {
@@ -48,7 +49,7 @@ export async function loadEnvironmentSpec(path) {
 }
 
 export function environmentDigest(spec) {
-  return createHash('sha256').update(JSON.stringify({ version: spec.version, name: spec.name, baseImage: spec.baseImage, apt: spec.apt, pip: spec.pip, playwright: spec.playwright, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ version: spec.version, name: spec.name, baseImage: spec.baseImage, apt: spec.apt, pip: spec.pip, playwright: spec.playwright, workspaceRuntime: spec.workspaceRuntime, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null })).digest('hex');
 }
 export function environmentImage(spec) { return `isolated-harness-env-${spec.name}:${environmentDigest(spec).slice(0, 12)}`; }
 export function environmentDirectory(stateRoot = defaultStateRoot()) { return join(stateRoot, 'environments'); }
@@ -64,6 +65,7 @@ export function renderEnvironmentDockerfile(spec, { includeTrustedCa = Boolean(s
   if (includeTrustedCa) lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
   if (spec.pip.length) lines.push('RUN python3 -m venv /opt/isolated-harness/python && /opt/isolated-harness/python/bin/pip install --no-cache-dir --disable-pip-version-check ' + spec.pip.join(' '), 'ENV VIRTUAL_ENV=/opt/isolated-harness/python', 'ENV PATH=/opt/isolated-harness/python/bin:${PATH}', 'ENV UV_SYSTEM_CERTS=true');
   if (spec.playwright.length) lines.push(`RUN PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright /opt/isolated-harness/python/bin/python -m playwright install --with-deps ${spec.playwright.join(' ')}`, 'ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright');
+  if (spec.workspaceRuntime) lines.push("RUN printf '%s\\n' '#!/bin/sh' 'set -eu' 'runtime=/workspace/runtime' 'managed=${ISOLATED_HARNESS_MANAGED_RUNTIME:-}' 'if [ -n \"$managed\" ]; then' '  ln -sfn \"$managed/python\" \"$runtime/python\"' '  ln -sfn \"$managed/venv\" \"$runtime/venv\"' '  [ -e \"$managed/pillow\" ] && ln -sfn \"$managed/pillow\" \"$runtime/pillow\" || true' '  browser_source=\"$managed/browsers\"' 'else' '  ln -sfn /opt/isolated-harness/python \"$runtime/venv\"' '  browser_source=/opt/ms-playwright' 'fi' 'mkdir -p \"$runtime/browsers/.links\"' 'for component in \"$browser_source\"/*; do' '  [ -e \"$component\" ] || continue' '  ln -sfn \"$component\" \"$runtime/browsers/$(basename \"$component\")\"' 'done' 'exec \"$@\"' > /usr/local/bin/isolated-harness-runtime && chmod 0755 /usr/local/bin/isolated-harness-runtime", 'ENTRYPOINT ["/usr/local/bin/isolated-harness-runtime"]');
   lines.push('USER node', 'CMD ["codex"]', '');
   return lines.join('\n');
 }

@@ -29,7 +29,7 @@ export function buildCodexContainerPlan({ image, mounts, workingDirectory, sessi
 // real Codex terminal UI; arguments after the contained-harness `--` separator
 // are forwarded untouched so new Codex CLI functionality does not require the
 // runner to reimplement it.
-export function buildCodexInteractivePlan({ image, mounts, workingDirectory, codexHomePath, authProjectionPath, profile = 'contained', user = '1000:1000', networkEnvironment = {}, trustedCa = false, codexArgs = [], tty = true }) {
+export function buildCodexInteractivePlan({ image, mounts, workingDirectory, codexHomePath, authProjectionPath, profile = 'contained', user = '1000:1000', networkEnvironment = {}, trustedCa = false, workspaceRuntime = false, runtimePath, codexArgs = [], tty = true }) {
   const workspace = mounts.find(mount => mount.containerPath === workingDirectory && mount.mode === 'rw');
   if (!workspace) throw new RunnerValidationError('WORKING_DIRECTORY_NOT_WRITABLE', 'workingDirectory must be the destination of a declared rw mount.');
   if (profile !== 'contained' && profile !== 'offline') throw new RunnerValidationError('ISOLATION_PROFILE_INVALID', `Unsupported profile: ${profile}`);
@@ -41,10 +41,12 @@ export function buildCodexInteractivePlan({ image, mounts, workingDirectory, cod
   if (profile !== 'offline') for (const [key, value] of Object.entries(networkEnvironment)) dockerArgs.push('--env', `${key}=${value}`);
   if (trustedCa) dockerArgs.push('--env', `SSL_CERT_FILE=${codexHomePath}/trusted-ca.pem`);
   for (const mount of mounts) dockerArgs.push('--mount', `type=bind,src=${mount.hostPath},dst=${mount.containerPath}${mount.mode === 'ro' ? ',readonly' : ''}`);
+  if (runtimePath) dockerArgs.push('--mount', `type=bind,src=${runtimePath},dst=/run/managed-runtime,readonly`, '--env', 'ISOLATED_HARNESS_MANAGED_RUNTIME=/run/managed-runtime', '--tmpfs', '/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m');
+  else if (workspaceRuntime) dockerArgs.push('--tmpfs', '/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m');
   // This file mount hides the empty workspace placeholder. Codex can refresh
   // the projected login for this container, while auth.json is never persisted
   // in the project-owned CODEX_HOME.
   dockerArgs.push('--mount', `type=bind,src=${authProjectionPath},dst=${codexHomePath}/auth.json`);
   dockerArgs.push(image, 'codex', '--cd', workingDirectory, ...codexArgs);
-  return { runtime: 'docker', dockerArgs, environment: { CODEX_HOME: codexHomePath, HOME: codexHomePath, proxy: profile === 'offline' ? 'disabled' : Object.keys(networkEnvironment).length ? 'host-configured' : 'not-configured' }, mountCount: mounts.length + 1, profile };
+  return { runtime: 'docker', dockerArgs, environment: { CODEX_HOME: codexHomePath, HOME: codexHomePath, proxy: profile === 'offline' ? 'disabled' : Object.keys(networkEnvironment).length ? 'host-configured' : 'not-configured', workspaceRuntime: runtimePath ? 'managed-readonly' : workspaceRuntime ? 'prebuilt' : 'not-mounted' }, mountCount: mounts.length + 1, profile };
 }

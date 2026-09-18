@@ -51,9 +51,11 @@ The [requirements document](docs/REQUIREMENTS.md) describes the runtime, authori
 ## Documentation
 
 - [Quick Start](docs/QUICKSTART.md) — prepare a workspace, launch an agent and resume it.
+- [Deployment](docs/DEPLOYMENT.md) — run Isolated Harness on a workstation or a self-hosted engineering service.
 - [Usage](docs/USAGE.md) — Skills, configuration, sessions and JSONL application integration.
 - [Requirements](docs/REQUIREMENTS.md) — environment, authorization and adapter requirements.
 - [Prepared environments](docs/ENVIRONMENTS.md) — reusable Python, document, browser/Chromium, and drawing-review images outside the workspace.
+- [Managed workspace runtimes](docs/ENVIRONMENTS.md#reuse-a-runtime-produced-by-a-workspace) — import an agent-built Linux runtime once and reuse it read-only across projects.
 - [Product requirements](docs/PRD.md) — product model, threat model and adapter contract.
 - [Implementation status](docs/IMPLEMENTATION.md) — implemented behavior and remaining work.
 - [Chat isolation demo](docs/CHAT_ISOLATION_DEMO.md) — evidence for continuity within one chat and isolation between chats.

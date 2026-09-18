@@ -10,6 +10,7 @@ import { planMounts } from './mounts.mjs';
 import { readMacOsTrustBundle, resolveHostProxy } from './network.mjs';
 import { defaultStateRoot } from './run.mjs';
 import { resolveEnvironment } from './environments.mjs';
+import { resolveRuntime } from './runtimes.mjs';
 
 const skillName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const hostCodexHome = ({ env = process.env, home = homedir() } = {}) => resolve(env.CODEX_HOME ?? join(home, '.codex'));
@@ -85,7 +86,7 @@ async function refreshInteractiveRegistration({ previous, skills, configPath, se
   return { skills: registeredSkills ?? { mode: 'none', skills: [] }, config: registeredConfig ?? null };
 }
 
-export async function startInteractiveCodex({ workspace, skills = [], configPath, sessionId, profile = 'contained', image = 'codex-cli:local', environmentName, codexArgs = [], stateRoot = defaultStateRoot(), tty = Boolean(process.stdin.isTTY && process.stdout.isTTY), spawnProcess = spawn } = {}) {
+export async function startInteractiveCodex({ workspace, skills = [], configPath, sessionId, profile = 'contained', image = 'codex-cli:local', environmentName, runtimeName, codexArgs = [], stateRoot = defaultStateRoot(), tty = Boolean(process.stdin.isTTY && process.stdout.isTTY), spawnProcess = spawn } = {}) {
   if (!workspace) throw new RunnerValidationError('INTERACTIVE_WORKSPACE_REQUIRED', '--workspace is required.');
   if (sessionId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(sessionId)) throw new RunnerValidationError('INTERACTIVE_SESSION_INVALID', '--session must be a safe non-empty identifier.');
   if (environmentName && image !== 'codex-cli:local') throw new RunnerValidationError('INTERACTIVE_ENVIRONMENT_IMAGE_CONFLICT', 'Use either --environment or --image, not both.');
@@ -116,9 +117,11 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
       if (trustBundle) { await writeFile(join(workspaceCodexHome, 'trusted-ca.pem'), trustBundle, { mode: 0o600 }); trustedCa = true; }
     }
     const environment = environmentName ? await resolveEnvironment(environmentName, { stateRoot }) : null;
+    const runtime = runtimeName ? await resolveRuntime(runtimeName, { stateRoot }) : null;
     const selectedImage = environment?.image ?? image;
-    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, codexArgs, tty });
-    const metadata = { version: 'v1', sessionId: sessionId ?? null, workspace: mounts[0], codexHome: workspaceCodexHome, skills: registeredSkills, config: registeredConfig ?? null, environment: environment ? { name: environment.name, image: environment.image, digest: environment.digest } : null, profile, image: selectedImage, codexArgs, startedAt: new Date().toISOString() };
+    const workspaceRuntime = Boolean(environment?.spec?.workspaceRuntime);
+    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, workspaceRuntime, runtimePath: runtime?.path, codexArgs, tty });
+    const metadata = { version: 'v1', sessionId: sessionId ?? null, workspace: mounts[0], codexHome: workspaceCodexHome, skills: registeredSkills, config: registeredConfig ?? null, environment: environment ? { name: environment.name, image: environment.image, digest: environment.digest, workspaceRuntime } : null, runtime: runtime ? { name: runtime.name, digest: runtime.digest, entries: runtime.entries, cacheIncluded: runtime.cacheIncluded } : null, profile, image: selectedImage, codexArgs, startedAt: new Date().toISOString() };
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
     const child = spawnProcess('docker', plan.dockerArgs, { stdio: 'inherit' });
     const exit = await waitForExit(child);

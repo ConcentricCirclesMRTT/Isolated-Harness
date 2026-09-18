@@ -63,6 +63,27 @@ isolated-harness codex --workspace /path/to/project --environment drawing-review
 cover smaller analysis and document tasks. See [Custom environments](ENVIRONMENTS.md)
 for all presets, custom specifications, TLS certificates, and reset workflow.
 
+## Reuse a runtime that an agent built
+
+If an earlier workspace already contains a compatible Linux runtime at
+`runtime/`, import it into Isolated Harness once. The managed copy is stored
+outside both projects, mounted read-only for later runs, and does not bring its
+mutable download cache unless requested.
+
+```sh
+isolated-harness runtime import --name drawing-runtime \
+  --source /path/to/earlier-project/runtime
+
+isolated-harness codex --workspace /path/to/new-project \
+  --environment drawing-review-v1 --runtime drawing-runtime
+```
+
+Use `isolated-harness runtime list` to inspect available imports. This is for
+Linux-container assets such as an agent-created Python environment and
+Playwright browser bundle; it does not turn them into macOS-native tools. The
+new container sees the runtime at `/workspace/runtime`, while the original
+managed artifact stays read-only.
+
 ## Open Codex in a project
 
 ```sh
