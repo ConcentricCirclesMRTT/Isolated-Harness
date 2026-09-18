@@ -1,0 +1,6 @@
+{
+  "version": "v1",
+  "name": "python-analysis-v1",
+  "baseImage": "codex-cli:local",
+  "pip": ["jsonschema", "numpy", "sympy"]
+}

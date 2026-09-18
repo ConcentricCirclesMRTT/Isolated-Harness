@@ -1,0 +1,7 @@
+{
+  "version": "v1",
+  "name": "document-review-v1",
+  "baseImage": "codex-cli:local",
+  "apt": ["poppler-utils", "libnss3"],
+  "pip": ["pillow", "pymupdf"]
+}

@@ -1,0 +1,21 @@
+flowchart LR
+  Terminal["Developer terminal"] --> Launcher["isolated-harness codex"]
+  Login["Host Codex login\nauth.json only"] -->|"temporary private mount"| Home
+  Skills["Selected Skills\ninherited or explicit paths"] -->|"project snapshot"| Home
+  Config["Optional config.toml"] -->|"project copy"| Home
+  Launcher --> Docker
+  subgraph Docker["Isolated Docker container"]
+    Home["Project CODEX_HOME\n.contained-harness/codex"]
+    CLI["Full Codex CLI\nTUI, MCP, plugins, review, resume"]
+    Home --> CLI
+    CLI --> Workspace["/workspace\nread/write bind mount"]
+  end
+  Project["Chosen host project directory"] <--> Workspace
+  Blocked["Host home, other projects,\nhost sessions and config"] -. "not mounted" .-> CLI
+
+  classDef host fill:#eef6ff,stroke:#2463a5,color:#102a43;
+  classDef container fill:#f3fff8,stroke:#21885d,color:#123b2a;
+  classDef blocked fill:#fff2f2,stroke:#b43b3b,color:#5c1616;
+  class Terminal,Login,Skills,Config,Project host;
+  class Docker,Home,CLI,Workspace container;
+  class Blocked blocked;

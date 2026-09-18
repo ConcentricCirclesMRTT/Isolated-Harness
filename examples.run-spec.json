@@ -1,0 +1,12 @@
+{
+  "version": "v1",
+  "harness": { "id": "codex-cli", "image": "codex-cli:local" },
+  "workingDirectory": "/workspace",
+  "mounts": [
+    { "hostPath": "/replace/with/your/project", "containerPath": "/workspace", "mode": "rw" },
+    { "hostPath": "/replace/with/your/reference", "containerPath": "/references", "mode": "ro" }
+  ],
+  "capabilities": { "inherit": { "skills": false, "mcps": false, "plugins": false } },
+  "isolation": { "profile": "contained" },
+  "task": "Inspect this workspace and report what you find."
+}

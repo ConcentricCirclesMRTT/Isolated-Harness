@@ -1,0 +1,59 @@
+{
+  "name": "isolated-harness",
+  "version": "0.1.0",
+  "description": "Run agent CLIs in isolated, direct-mounted workspaces without sharing host memory.",
+  "license": "MIT",
+  "author": {
+    "name": "MarvelousRC",
+    "email": "robertzju@outlook.com",
+    "url": "https://github.com/MarvelousRC"
+  },
+  "type": "module",
+  "bin": {
+    "isolated-harness": "./bin/contained-harness.mjs",
+    "contained-harness": "./bin/contained-harness.mjs",
+    "harness-runner": "./bin/harness-runner.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "assets/",
+    "docs/",
+    "demo/",
+    "Dockerfile",
+    "README.md",
+    "LICENSE",
+    "examples.run-spec.json",
+    "examples/",
+    "presets/"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/harness-runner.mjs && node --check bin/contained-harness.mjs && node --check src/spec.mjs && node --check src/mounts.mjs && node --check src/credentials/hostCodex.mjs && node --check src/capabilities.mjs && node --check src/network.mjs && node --check src/adapters/codex.mjs && node --check src/events.mjs && node --check src/environments.mjs && node --check src/interactive.mjs && node --check src/run.mjs",
+    "preflight": "node bin/harness-runner.mjs preflight",
+    "demo:chat-isolation": "node demo/chat-isolation-demo.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "agent-isolation",
+    "agent-harness",
+    "isolated-workspace",
+    "mounted-workspace",
+    "memory-isolation",
+    "context-isolation",
+    "authorization-projection",
+    "codex-cli",
+    "claude-code",
+    "deepseek",
+    "docker",
+    "sandbox",
+    "skills-evaluation",
+    "agent-pipeline",
+    "reproducible-ai"
+  ]
+}

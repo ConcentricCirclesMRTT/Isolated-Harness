@@ -1,0 +1,8 @@
+{
+  "version": "v1",
+  "name": "drawing-review-v1",
+  "baseImage": "codex-cli:local",
+  "apt": ["poppler-utils", "libnss3"],
+  "pip": ["jsonschema", "sympy", "pymupdf", "pillow", "numpy", "playwright"],
+  "playwright": ["chromium"]
+}

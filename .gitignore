@@ -1,0 +1,25 @@
+# Node.js dependencies and package artifacts
+node_modules/
+*.tgz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test and tool output
+coverage/
+.nyc_output/
+
+# Isolated Harness project-owned agent state
+.contained-harness/
+.isolated-harness/
+
+# Operating system files
+.DS_Store
