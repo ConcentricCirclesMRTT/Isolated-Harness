@@ -74,6 +74,9 @@ node bin/harness-runner.mjs chat send tower-review-42 /path/to/project "List the
 ```
 
 The chosen directory is mounted at `/workspace` with read/write access. The
+contained Codex process has full access inside that container by default, so it
+can edit and run tools in the mounted workspace without per-command approval.
+The container boundary still prevents access to other host directories.
 first command for `tower-review-42` creates one private Codex thread. A later
 command with the same chat ID resumes that thread:
 

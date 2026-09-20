@@ -51,6 +51,9 @@ export function buildCodexInteractivePlan({ image, mounts, workingDirectory, cod
   // the projected login for this container, while auth.json is never persisted
   // in the project-owned CODEX_HOME.
   dockerArgs.push('--mount', `type=bind,src=${authProjectionPath},dst=${codexHomePath}/auth.json`);
-  dockerArgs.push(image, 'codex', '--cd', workingDirectory, ...codexArgs);
+  // The container is already restricted to the declared workspace mount. Give
+  // Codex full access inside that container by default, so normal file edits
+  // do not stop for approval prompts while the host remains isolated.
+  dockerArgs.push(image, 'codex', '--cd', workingDirectory, '--dangerously-bypass-approvals-and-sandbox', ...codexArgs);
   return { runtime: 'docker', dockerArgs, environment: { CODEX_HOME: codexHomePath, HOME: codexHomePath, proxy: profile === 'offline' ? 'disabled' : Object.keys(networkEnvironment).length ? 'host-configured' : 'not-configured', workspaceRuntime: runtimePath ? (runtimeWritable ? 'managed-writable' : 'managed-readonly') : workspaceRuntime ? 'prebuilt' : 'not-mounted' }, mountCount: mounts.length + 1 + (agentInstructionsPath ? 1 : 0), profile };
 }

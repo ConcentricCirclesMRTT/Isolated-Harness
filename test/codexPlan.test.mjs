@@ -26,9 +26,9 @@ test('opens the complete Codex CLI and forwards its arguments unchanged', () => 
   assert.ok(plan.dockerArgs.includes('--interactive'));
   assert.ok(plan.dockerArgs.includes('--tty'));
   const codexIndex = plan.dockerArgs.lastIndexOf('codex');
-  assert.deepEqual(plan.dockerArgs.slice(codexIndex), ['codex', '--cd', '/workspace', '--model', 'gpt-5.6-luna', '--search']);
+  assert.deepEqual(plan.dockerArgs.slice(codexIndex), ['codex', '--cd', '/workspace', '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5.6-luna', '--search']);
   assert.equal(plan.dockerArgs.includes('--ephemeral'), false);
-  assert.equal(plan.dockerArgs.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+  assert.ok(plan.dockerArgs.includes('--dangerously-bypass-approvals-and-sandbox'));
   assert.ok(plan.dockerArgs.includes('CODEX_HOME=/workspace/.contained-harness/codex'));
   assert.ok(plan.dockerArgs.includes('type=bind,src=/runner/private/auth.json,dst=/workspace/.contained-harness/codex/auth.json'));
   assert.ok(plan.dockerArgs.includes('/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m'));
