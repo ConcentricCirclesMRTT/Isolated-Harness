@@ -155,7 +155,14 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
       if (trustBundle) { await writeFile(join(workspaceCodexHome, 'trusted-ca.pem'), trustBundle, { mode: 0o600 }); trustedCa = true; }
     }
     const environment = environmentName ? await resolveEnvironment(environmentName, { stateRoot }) : null;
-    const runtime = runtimeName ? await resolveRuntime(runtimeName, { stateRoot }) : null;
+    let runtime = null;
+    if (runtimeName) {
+      try { runtime = await resolveRuntime(runtimeName, { stateRoot }); }
+      catch (error) {
+        if (error?.code === 'RUNTIME_NOT_FOUND') throw new RunnerValidationError(error.code, `${error.message} If you want the environment's built-in runtime, omit --runtime; it is already available inside the selected environment image.`);
+        throw error;
+      }
+    }
     releaseRuntimeLock = runtimeWritable ? await acquireWritableRuntime(runtime, sessionId) : null;
     const selectedImage = environment?.image ?? image;
     const workspaceRuntime = Boolean(environment?.spec?.workspaceRuntime);

@@ -57,6 +57,11 @@ isolated-harness runtime import --name drawing-runtime --source /path/to/workspa
 isolated-harness codex --workspace /path/to/new-project --environment drawing-review-v1 --runtime drawing-runtime
 ```
 
+The `--runtime` option is an override, not a requirement. Omitting it uses the
+Python, Playwright and browser runtime already bundled in `drawing-review-v1`.
+That is the normal path and reuses the locally built Docker image without
+downloading dependencies for each workspace.
+
 The default import retains executable runtime entries such as `browsers`,
 `python`, `venv`, `uv-arm`, and `uv-wheel`, but deliberately omits a mutable
 download `cache/`. Pass `--with-cache` only when that cache is needed for a
