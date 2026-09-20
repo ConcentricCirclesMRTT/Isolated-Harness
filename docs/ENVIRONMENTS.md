@@ -39,6 +39,12 @@ tmpfs mount for the current container, so it does not create or retain a
 `/workspace/runtime/venv/bin/python` and
 `PLAYWRIGHT_BROWSERS_PATH=/workspace/runtime/browsers`.
 
+The runner also mounts a generated, read-only `AGENTS.md` for the session. It
+describes whether the runtime comes from the environment image or a managed
+read-only runtime, lists the prepared entries, and tells the agent to reuse it
+instead of downloading dependencies again. The generated file is temporary and
+does not modify the host workspace's `AGENTS.md`.
+
 ## Reuse a runtime produced by a workspace
 
 When an agent has already assembled a Linux runtime in a workspace, import it

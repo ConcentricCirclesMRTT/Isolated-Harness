@@ -86,6 +86,31 @@ async function refreshInteractiveRegistration({ previous, skills, configPath, se
   return { skills: registeredSkills ?? { mode: 'none', skills: [] }, config: registeredConfig ?? null };
 }
 
+async function writeRuntimeAgentGuide({ workspace, destination, environment, runtime, workspaceRuntime }) {
+  let existing = '';
+  try { existing = await readFile(join(workspace, 'AGENTS.md'), 'utf8'); } catch {}
+  const runtimeMode = runtime ? 'managed-readonly' : workspaceRuntime ? 'environment-image' : 'none';
+  const lines = [
+    '# Isolated Harness runtime contract',
+    '',
+    'This file is generated for the current isolated Codex session. It is mounted read-only at `/workspace/AGENTS.md` and is not written into the host workspace.',
+    '',
+    `- Runtime mode: **${runtimeMode}**`,
+    `- Runtime path: **${runtimeMode === 'none' ? 'not mounted' : '/workspace/runtime'}**`,
+    environment ? `- Environment image: **${environment.name}** (${environment.image}, digest ${environment.digest})` : '- Environment image: none selected',
+    runtime ? `- Managed runtime: **${runtime.name}** (digest ${runtime.digest})` : '- Managed runtime: none selected',
+    runtime ? `- Prepared entries: ${runtime.entries.join(', ')}` : workspaceRuntime ? '- Prepared entries come from the environment image.' : '- No prepared runtime was selected for this session.',
+    '',
+    'Runtime policy:',
+    runtimeMode === 'none' ? '- Do not assume that Python, Playwright, browsers, or image/PDF packages are preinstalled. Report missing dependencies before downloading them.' : '- Prefer the prepared runtime for Python, virtualenv, Playwright, browsers, and image/PDF dependencies.',
+    runtimeMode === 'managed-readonly' ? '- The managed runtime is read-only. Do not modify it, reinstall into it, or replace it. Use a project-local temporary directory only when explicitly requested.' : '- Do not recreate the environment unless the user explicitly requests it.',
+    '- The host workspace is directly mounted at `/workspace`; files created there are real project files and must be treated as user data.',
+    '',
+  ];
+  if (existing.trim()) lines.push('---', '', 'Existing project instructions:', '', existing.trim(), '');
+  await writeFile(destination, `${lines.join('\n')}\n`, { mode: 0o600 });
+}
+
 export async function startInteractiveCodex({ workspace, skills = [], configPath, sessionId, profile = 'contained', image = 'codex-cli:local', environmentName, runtimeName, codexArgs = [], stateRoot = defaultStateRoot(), tty = Boolean(process.stdin.isTTY && process.stdout.isTTY), spawnProcess = spawn } = {}) {
   if (!workspace) throw new RunnerValidationError('INTERACTIVE_WORKSPACE_REQUIRED', '--workspace is required.');
   if (sessionId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(sessionId)) throw new RunnerValidationError('INTERACTIVE_SESSION_INVALID', '--session must be a safe non-empty identifier.');
@@ -120,7 +145,9 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
     const runtime = runtimeName ? await resolveRuntime(runtimeName, { stateRoot }) : null;
     const selectedImage = environment?.image ?? image;
     const workspaceRuntime = Boolean(environment?.spec?.workspaceRuntime);
-    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, workspaceRuntime, runtimePath: runtime?.path, codexArgs, tty });
+    const agentInstructionsPath = join(projectionRoot, 'AGENTS.md');
+    await writeRuntimeAgentGuide({ workspace: hostWorkspace, destination: agentInstructionsPath, environment, runtime, workspaceRuntime });
+    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), agentInstructionsPath, profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, workspaceRuntime, runtimePath: runtime?.path, codexArgs, tty });
     const metadata = { version: 'v1', sessionId: sessionId ?? null, workspace: mounts[0], codexHome: workspaceCodexHome, skills: registeredSkills, config: registeredConfig ?? null, environment: environment ? { name: environment.name, image: environment.image, digest: environment.digest, workspaceRuntime } : null, runtime: runtime ? { name: runtime.name, digest: runtime.digest, entries: runtime.entries, cacheIncluded: runtime.cacheIncluded } : null, profile, image: selectedImage, codexArgs, startedAt: new Date().toISOString() };
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
     const child = spawnProcess('docker', plan.dockerArgs, { stdio: 'inherit' });

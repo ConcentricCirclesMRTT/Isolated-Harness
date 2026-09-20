@@ -22,7 +22,7 @@ test('uses no network only for the explicit offline profile', () => {
 });
 
 test('opens the complete Codex CLI and forwards its arguments unchanged', () => {
-  const plan = buildCodexInteractivePlan({ image: 'codex-cli:local', workingDirectory: '/workspace', codexHomePath: '/workspace/.contained-harness/codex', authProjectionPath: '/runner/private/auth.json', profile: 'contained', workspaceRuntime: true, mounts: [{ hostPath: '/host/project', containerPath: '/workspace', mode: 'rw' }], codexArgs: ['--model', 'gpt-5.6-luna', '--search'] });
+  const plan = buildCodexInteractivePlan({ image: 'codex-cli:local', workingDirectory: '/workspace', codexHomePath: '/workspace/.contained-harness/codex', authProjectionPath: '/runner/private/auth.json', agentInstructionsPath: '/runner/private/AGENTS.md', profile: 'contained', workspaceRuntime: true, mounts: [{ hostPath: '/host/project', containerPath: '/workspace', mode: 'rw' }], codexArgs: ['--model', 'gpt-5.6-luna', '--search'] });
   assert.ok(plan.dockerArgs.includes('--interactive'));
   assert.ok(plan.dockerArgs.includes('--tty'));
   const codexIndex = plan.dockerArgs.lastIndexOf('codex');
@@ -32,6 +32,9 @@ test('opens the complete Codex CLI and forwards its arguments unchanged', () => 
   assert.ok(plan.dockerArgs.includes('CODEX_HOME=/workspace/.contained-harness/codex'));
   assert.ok(plan.dockerArgs.includes('type=bind,src=/runner/private/auth.json,dst=/workspace/.contained-harness/codex/auth.json'));
   assert.ok(plan.dockerArgs.includes('/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m'));
+  assert.ok(plan.dockerArgs.includes('type=bind,src=/runner/private/AGENTS.md,dst=/workspace/AGENTS.md,readonly'));
+  assert.ok(plan.dockerArgs.includes('ISOLATED_HARNESS_RUNTIME_MODE=environment-image'));
+  assert.ok(plan.dockerArgs.includes('PLAYWRIGHT_BROWSERS_PATH=/workspace/runtime/browsers'));
   assert.equal(plan.environment.workspaceRuntime, 'prebuilt');
 });
 
