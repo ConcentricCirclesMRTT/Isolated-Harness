@@ -45,3 +45,11 @@ test('mounts a deliberately imported runtime read-only ahead of a prebuilt compa
   assert.ok(plan.dockerArgs.includes('/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m'));
   assert.equal(plan.environment.workspaceRuntime, 'managed-readonly');
 });
+
+test('opens an explicitly writable managed runtime only when requested', () => {
+  const plan = buildCodexInteractivePlan({ image: 'codex-cli:local', workingDirectory: '/workspace', codexHomePath: '/workspace/.contained-harness/codex', authProjectionPath: '/runner/private/auth.json', profile: 'contained', workspaceRuntime: true, runtimePath: '/runner/runtimes/drawing-runtime', runtimeWritable: true, mounts: [{ hostPath: '/host/project', containerPath: '/workspace', mode: 'rw' }] });
+  assert.ok(plan.dockerArgs.includes('type=bind,src=/runner/runtimes/drawing-runtime,dst=/run/managed-runtime'));
+  assert.equal(plan.dockerArgs.some(value => value.includes('dst=/run/managed-runtime,readonly')), false);
+  assert.ok(plan.dockerArgs.includes('ISOLATED_HARNESS_RUNTIME_MODE=managed-writable'));
+  assert.equal(plan.environment.workspaceRuntime, 'managed-writable');
+});

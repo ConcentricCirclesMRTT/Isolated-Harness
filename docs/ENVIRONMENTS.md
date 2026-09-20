@@ -67,6 +67,26 @@ installation link while the imported browser binaries remain read-only; an
 idempotent `playwright install chromium` therefore reuses the browser without
 redownloading it.
 
+### Explicit shared-runtime writes
+
+The default is read-only because a managed runtime may be shared by many
+projects. When a dependency genuinely needs to be added to that shared runtime,
+the owner can opt into a serialized writable session:
+
+```sh
+isolated-harness codex \
+  --workspace /path/to/project \
+  --environment drawing-review-v1 \
+  --runtime drawing-runtime \
+  --runtime-write
+```
+
+`--runtime-write` only changes the managed runtime mount to read/write. It does
+not make the Docker image mutable, and it refuses to start while another
+writable session holds the runtime lock. Use it for deliberate environment
+maintenance, then import or snapshot a new named runtime for reproducible work.
+Normal sessions should continue using the default read-only mode.
+
 ## Bundled environments
 
 The package includes four reviewed presets. They are ordinary local Docker

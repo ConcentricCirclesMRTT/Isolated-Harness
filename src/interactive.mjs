@@ -86,10 +86,10 @@ async function refreshInteractiveRegistration({ previous, skills, configPath, se
   return { skills: registeredSkills ?? { mode: 'none', skills: [] }, config: registeredConfig ?? null };
 }
 
-async function writeRuntimeAgentGuide({ workspace, destination, environment, runtime, workspaceRuntime }) {
+async function writeRuntimeAgentGuide({ workspace, destination, environment, runtime, runtimeWritable, workspaceRuntime }) {
   let existing = '';
   try { existing = await readFile(join(workspace, 'AGENTS.md'), 'utf8'); } catch {}
-  const runtimeMode = runtime ? 'managed-readonly' : workspaceRuntime ? 'environment-image' : 'none';
+  const runtimeMode = runtime ? (runtimeWritable ? 'managed-writable' : 'managed-readonly') : workspaceRuntime ? 'environment-image' : 'none';
   const lines = [
     '# Isolated Harness runtime contract',
     '',
@@ -103,7 +103,7 @@ async function writeRuntimeAgentGuide({ workspace, destination, environment, run
     '',
     'Runtime policy:',
     runtimeMode === 'none' ? '- Do not assume that Python, Playwright, browsers, or image/PDF packages are preinstalled. Report missing dependencies before downloading them.' : '- Prefer the prepared runtime for Python, virtualenv, Playwright, browsers, and image/PDF dependencies.',
-    runtimeMode === 'managed-readonly' ? '- The managed runtime is read-only. Do not modify it, reinstall into it, or replace it. Use a project-local temporary directory only when explicitly requested.' : '- Do not recreate the environment unless the user explicitly requests it.',
+    runtimeMode === 'managed-readonly' ? '- The managed runtime is read-only. Do not modify it, reinstall into it, or replace it. Use a project-local temporary directory only when explicitly requested.' : runtimeMode === 'managed-writable' ? '- This managed runtime is shared and writable only because the user explicitly enabled it. Reuse existing packages, avoid destructive changes, and do not run concurrent sessions against it.' : '- Do not recreate the environment unless the user explicitly requests it.',
     '- The host workspace is directly mounted at `/workspace`; files created there are real project files and must be treated as user data.',
     '',
   ];
@@ -111,10 +111,22 @@ async function writeRuntimeAgentGuide({ workspace, destination, environment, run
   await writeFile(destination, `${lines.join('\n')}\n`, { mode: 0o600 });
 }
 
-export async function startInteractiveCodex({ workspace, skills = [], configPath, sessionId, profile = 'contained', image = 'codex-cli:local', environmentName, runtimeName, codexArgs = [], stateRoot = defaultStateRoot(), tty = Boolean(process.stdin.isTTY && process.stdout.isTTY), spawnProcess = spawn } = {}) {
+async function acquireWritableRuntime(runtime, sessionId) {
+  const lockPath = `${runtime.path}.lock`;
+  try { await mkdir(lockPath, { mode: 0o700 }); }
+  catch (error) {
+    if (error.code === 'EEXIST') throw new RunnerValidationError('RUNTIME_BUSY', `Managed runtime "${runtime.name}" is already in use for writing. Wait for that session to finish or remove its stale lock: ${lockPath}`);
+    throw error;
+  }
+  await writeFile(join(lockPath, 'owner.json'), `${JSON.stringify({ runtime: runtime.name, sessionId: sessionId ?? null, startedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+  return () => rm(lockPath, { recursive: true, force: true });
+}
+
+export async function startInteractiveCodex({ workspace, skills = [], configPath, sessionId, profile = 'contained', image = 'codex-cli:local', environmentName, runtimeName, runtimeWritable = false, codexArgs = [], stateRoot = defaultStateRoot(), tty = Boolean(process.stdin.isTTY && process.stdout.isTTY), spawnProcess = spawn } = {}) {
   if (!workspace) throw new RunnerValidationError('INTERACTIVE_WORKSPACE_REQUIRED', '--workspace is required.');
   if (sessionId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(sessionId)) throw new RunnerValidationError('INTERACTIVE_SESSION_INVALID', '--session must be a safe non-empty identifier.');
   if (environmentName && image !== 'codex-cli:local') throw new RunnerValidationError('INTERACTIVE_ENVIRONMENT_IMAGE_CONFLICT', 'Use either --environment or --image, not both.');
+  if (runtimeWritable && !runtimeName) throw new RunnerValidationError('RUNTIME_WRITE_REQUIRES_RUNTIME', '--runtime-write requires --runtime <name>.');
   const mounts = await planMounts([{ hostPath: workspace, containerPath: '/workspace', mode: 'rw' }], { runnerStateRoot: stateRoot });
   const hostWorkspace = mounts[0].hostPath;
   const workspaceCodexHome = projectCodexHome(hostWorkspace, sessionId);
@@ -126,6 +138,7 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
   if (login.status !== 'available') throw new RunnerValidationError('HOST_LOGIN_UNAVAILABLE', 'Log in to Codex on the host before opening an isolated Codex CLI.');
   const projectionRoot = join(stateRoot, 'credential-projections', randomUUID());
   const privateAuthHome = join(projectionRoot, 'codex-home');
+  let releaseRuntimeLock;
   await mkdir(workspaceCodexHome, { recursive: true, mode: 0o700 });
   // Docker overlays the temporary private auth file here. The empty placeholder
   // means the project never receives a usable host login after the container exits.
@@ -143,11 +156,12 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
     }
     const environment = environmentName ? await resolveEnvironment(environmentName, { stateRoot }) : null;
     const runtime = runtimeName ? await resolveRuntime(runtimeName, { stateRoot }) : null;
+    releaseRuntimeLock = runtimeWritable ? await acquireWritableRuntime(runtime, sessionId) : null;
     const selectedImage = environment?.image ?? image;
     const workspaceRuntime = Boolean(environment?.spec?.workspaceRuntime);
     const agentInstructionsPath = join(projectionRoot, 'AGENTS.md');
-    await writeRuntimeAgentGuide({ workspace: hostWorkspace, destination: agentInstructionsPath, environment, runtime, workspaceRuntime });
-    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), agentInstructionsPath, profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, workspaceRuntime, runtimePath: runtime?.path, codexArgs, tty });
+    await writeRuntimeAgentGuide({ workspace: hostWorkspace, destination: agentInstructionsPath, environment, runtime, runtimeWritable, workspaceRuntime });
+    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), agentInstructionsPath, profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, workspaceRuntime, runtimePath: runtime?.path, runtimeWritable, codexArgs, tty });
     const metadata = { version: 'v1', sessionId: sessionId ?? null, workspace: mounts[0], codexHome: workspaceCodexHome, skills: registeredSkills, config: registeredConfig ?? null, environment: environment ? { name: environment.name, image: environment.image, digest: environment.digest, workspaceRuntime } : null, runtime: runtime ? { name: runtime.name, digest: runtime.digest, entries: runtime.entries, cacheIncluded: runtime.cacheIncluded } : null, profile, image: selectedImage, codexArgs, startedAt: new Date().toISOString() };
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
     const child = spawnProcess('docker', plan.dockerArgs, { stdio: 'inherit' });
@@ -156,6 +170,7 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
     return { ...metadata, state: exit.code === 0 ? 'completed' : 'failed', sessionPath: workspaceCodexHome };
   } finally {
+    if (releaseRuntimeLock) await releaseRuntimeLock();
     await rm(projectionRoot, { recursive: true, force: true });
   }
 }
