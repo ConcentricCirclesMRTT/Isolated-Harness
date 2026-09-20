@@ -62,6 +62,19 @@ Python, Playwright and browser runtime already bundled in `drawing-review-v1`.
 That is the normal path and reuses the locally built Docker image without
 downloading dependencies for each workspace.
 
+To bake an existing managed runtime into a new environment image once, build
+the environment with `--runtime-source`:
+
+```sh
+isolated-harness environment build \
+  --preset drawing-review \
+  --runtime-source /path/to/managed-runtime
+```
+
+The runtime is copied into the image during that one local build. Later
+projects use only `--environment drawing-review-v1`; they do not need a separate
+runtime name or another dependency download.
+
 The default import retains executable runtime entries such as `browsers`,
 `python`, `venv`, `uv-arm`, and `uv-wheel`, but deliberately omits a mutable
 download `cache/`. Pass `--with-cache` only when that cache is needed for a

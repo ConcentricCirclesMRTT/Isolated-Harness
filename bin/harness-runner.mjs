@@ -18,7 +18,7 @@ const usage = `Usage:
   harness-runner <preflight|plan|run> <run-spec.json>
   harness-runner image build [tag] [--codex-version <version>]
   harness-runner environment build --spec <environment.json>
-  harness-runner environment build --preset <name>
+  harness-runner environment build --preset <name> [--runtime-source <directory>]
   harness-runner environment presets
   harness-runner environment prebuild [preset ...]
   harness-runner environment list
@@ -57,10 +57,17 @@ function chatSpec(chatId, workspace, task) {
     task
   });
 }
-async function environmentSpecPath(args) {
-  if (args[0] === '--preset' && args[1] && args.length === 2) return presetEnvironmentSpec(args[1]);
-  if (args[0] !== '--spec' || !args[1] || args.length !== 2) throw new Error(usage);
-  return args[1];
+async function environmentBuildOptions(args) {
+  let spec;
+  let runtimeSource;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--preset' && args[index + 1]) spec = await presetEnvironmentSpec(args[++index]);
+    else if (args[index] === '--spec' && args[index + 1]) spec = args[++index];
+    else if (args[index] === '--runtime-source' && args[index + 1]) runtimeSource = args[++index];
+    else throw new Error(usage);
+  }
+  if (!spec) throw new Error(usage);
+  return { spec, runtimeSource };
 }
 function runtimeImportOptions(args) {
   const options = { includeCache: false };
@@ -75,7 +82,7 @@ function runtimeImportOptions(args) {
 }
 try {
   if (command === 'image' && subcommand === 'build') await buildImage(imageBuildOptions(arguments_));
-  else if (command === 'environment' && subcommand === 'build') emit({ type: 'environment_built', ...(await buildEnvironment(await environmentSpecPath(arguments_))) });
+  else if (command === 'environment' && subcommand === 'build') { const options = await environmentBuildOptions(arguments_); emit({ type: 'environment_built', ...(await buildEnvironment(options.spec, { runtimeSource: options.runtimeSource })) }); }
   else if (command === 'environment' && subcommand === 'presets') emit({ type: 'environment_presets', presets: await listEnvironmentPresets() });
   else if (command === 'environment' && subcommand === 'prebuild') {
     const presets = arguments_.length ? arguments_ : await listEnvironmentPresets();
