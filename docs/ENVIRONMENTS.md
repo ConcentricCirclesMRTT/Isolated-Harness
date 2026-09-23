@@ -59,6 +59,25 @@ isolated-harness codex --workspace /path/to/new-project --environment drawing-re
 
 The `--runtime` option is an override, not a requirement. Omitting it uses the
 Python, Playwright and browser runtime already bundled in `drawing-review-v1`.
+
+## Verify a prepared environment
+
+Before opening an agent session, verify the selected environment with an
+offline probe:
+
+```sh
+isolated-harness environment verify drawing-review-v1
+```
+
+The probe starts the same read-only container contract used by a session with
+network disabled. It checks the `/workspace/runtime` links, imports every
+Python dependency declared by the environment, and checks that the requested
+Playwright browser directory is available. It does not install packages,
+download a browser, or create a `runtime/` directory in the host workspace.
+
+`environment prebuild` also preserves a matching managed runtime that was
+previously baked into an environment, rather than silently rebuilding without
+that local artifact.
 That is the normal path and reuses the locally built Docker image without
 downloading dependencies for each workspace.
 

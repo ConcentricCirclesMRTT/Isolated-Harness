@@ -1,4 +1,4 @@
-import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -130,6 +130,47 @@ export async function listEnvironments({ stateRoot = defaultStateRoot() } = {}) 
     const manifests = await Promise.all(files.filter(file => file.endsWith('.json')).map(file => readFile(join(environmentDirectory(stateRoot), file), 'utf8').then(JSON.parse)));
     return manifests.sort((left, right) => left.name.localeCompare(right.name));
   } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+}
+
+const pythonImportName = requirement => ({ pymupdf: 'fitz', pillow: 'PIL' }[requirement.split('==')[0]] ?? requirement.split('==')[0]);
+
+/** A no-network proof that the runtime links and declared dependencies are usable.
+ * Keep this generated from the environment spec so the test cannot accidentally
+ * drift from the image contract that the agent receives. */
+export function environmentVerificationScript(spec) {
+  const imports = (spec.pip ?? []).map(pythonImportName).filter(Boolean);
+  const checks = [
+    'test -L /workspace/runtime/venv',
+    'test -L /workspace/runtime/python',
+    'test -x /workspace/runtime/venv/bin/python',
+    imports.length ? `/workspace/runtime/venv/bin/python -c ${JSON.stringify(`import ${imports.join(', ')}`)}` : 'true',
+    (spec.playwright ?? []).length ? 'test -d "$PLAYWRIGHT_BROWSERS_PATH" && find "$PLAYWRIGHT_BROWSERS_PATH" -mindepth 1 -maxdepth 1 -type d | grep -q .' : 'true',
+  ];
+  return checks.join(' && ');
+}
+
+export async function verifyEnvironment(name, { stateRoot = defaultStateRoot(), spawnProcess = spawn } = {}) {
+  const environment = await resolveEnvironment(name, { stateRoot });
+  const spec = parseEnvironmentSpec(environment.spec);
+  const workspace = await mkdtemp(join(tmpdir(), 'isolated-harness-runtime-verify-'));
+  await chmod(workspace, 0o777);
+  const imports = spec.pip.map(pythonImportName).filter(Boolean);
+  try {
+    const args = [
+      'run', '--rm', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--network', 'none', '--user=1000:1000', '--workdir', '/workspace',
+      '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', '--tmpfs', '/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m',
+      '--mount', `type=bind,src=${workspace},dst=/workspace`,
+      '--env', 'ISOLATED_HARNESS_RUNTIME_MODE=environment-image', '--env', 'ISOLATED_HARNESS_RUNTIME_PATH=/workspace/runtime', '--env', 'PLAYWRIGHT_BROWSERS_PATH=/workspace/runtime/browsers',
+      environment.image, 'sh', '-lc', environmentVerificationScript(spec),
+    ];
+    const child = spawnProcess('docker', args, { stdio: 'pipe' });
+    let stdout = '', stderr = '';
+    child.stdout?.on('data', value => { stdout += value; });
+    child.stderr?.on('data', value => { stderr += value; });
+    const exitCode = await waitForExit(child);
+    if (exitCode !== 0) throw new RunnerValidationError('ENVIRONMENT_VERIFY_FAILED', `Environment ${name} is not ready: ${(stderr || stdout || `Docker exited ${exitCode}`).trim().slice(0, 1000)}`);
+    return { verified: true, verifiedAt: new Date().toISOString(), name: environment.name, image: environment.image, digest: environment.digest, runtimeContractVersion: environment.runtimeContractVersion ?? 'v1', imports, browsers: spec.playwright, network: 'none' };
+  } finally { await rm(workspace, { recursive: true, force: true }); }
 }
 
 export async function resetEnvironment(name, { stateRoot = defaultStateRoot(), spawnProcess = spawn } = {}) {

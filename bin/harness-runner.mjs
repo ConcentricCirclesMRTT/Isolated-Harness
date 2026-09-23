@@ -9,7 +9,7 @@ import { inspectHostCodexLogin } from '../src/credentials/hostCodex.mjs';
 import { buildCodexContainerPlan } from '../src/adapters/codex.mjs';
 import { defaultStateRoot, startCodexRun } from '../src/run.mjs';
 import { resolveCapabilities } from '../src/capabilities.mjs';
-import { buildEnvironment, listEnvironmentPresets, listEnvironments, presetEnvironmentSpec, resetEnvironment } from '../src/environments.mjs';
+import { buildEnvironment, listEnvironmentPresets, listEnvironments, loadEnvironmentSpec, presetEnvironmentSpec, resetEnvironment, resolveEnvironment, verifyEnvironment } from '../src/environments.mjs';
 import { importRuntime, listRuntimes } from '../src/runtimes.mjs';
 
 const [command, subcommand, ...arguments_] = process.argv.slice(2);
@@ -22,6 +22,7 @@ const usage = `Usage:
   harness-runner environment presets
   harness-runner environment prebuild [preset ...]
   harness-runner environment list
+  harness-runner environment verify <name>
   harness-runner environment reset <name>
   harness-runner runtime import --name <name> --source <directory> [--with-cache]
   harness-runner runtime list
@@ -87,9 +88,20 @@ try {
   else if (command === 'environment' && subcommand === 'prebuild') {
     const presets = arguments_.length ? arguments_ : await listEnvironmentPresets();
     emit({ type: 'environment_prebuild_started', presets });
-    for (const preset of presets) emit({ type: 'environment_built', ...(await buildEnvironment(await presetEnvironmentSpec(preset))) });
+    const runtimes = await listRuntimes();
+    for (const preset of presets) {
+      const specPath = await presetEnvironmentSpec(preset);
+      const spec = await loadEnvironmentSpec(specPath);
+      const previous = await resolveEnvironment(spec.name).catch(() => null);
+      const runtimeSource = previous?.spec?.bundledRuntimeDigest ? runtimes.find(runtime => runtime.digest === previous.spec.bundledRuntimeDigest)?.path : undefined;
+      emit({ type: 'environment_built', ...(await buildEnvironment(specPath, { runtimeSource })) });
+    }
   }
   else if (command === 'environment' && subcommand === 'list') emit({ type: 'environments', environments: await listEnvironments() });
+  else if (command === 'environment' && subcommand === 'verify') {
+    if (!arguments_[0] || arguments_.length !== 1) throw new Error(usage);
+    emit({ type: 'environment_verified', ...(await verifyEnvironment(arguments_[0])) });
+  }
   else if (command === 'environment' && subcommand === 'reset') {
     if (!arguments_[0] || arguments_.length !== 1) throw new Error(usage);
     emit({ type: 'environment_reset', ...(await resetEnvironment(arguments_[0])) });
