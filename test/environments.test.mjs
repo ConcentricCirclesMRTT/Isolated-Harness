@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { environmentDigest, environmentImage, environmentVerificationScript, parseEnvironmentSpec, renderEnvironmentDockerfile } from '../src/environments.mjs';
+import { EventEmitter } from 'node:events';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { environmentDigest, environmentImage, environmentManifestPath, environmentVerificationScript, parseEnvironmentSpec, renderEnvironmentDockerfile, verifyEnvironment } from '../src/environments.mjs';
 
 test('renders a reproducible custom environment image with apt and Python dependencies', () => {
   const spec = parseEnvironmentSpec({ version: 'v1', name: 'drawing-review-v1', baseImage: 'codex-cli:local', apt: ['poppler-utils', 'libnss3'], pip: ['pymupdf', 'playwright==1.52.0'], playwright: ['chromium'], workspaceRuntime: true });
@@ -24,6 +28,24 @@ test('verification script proves the image runtime imports and browser path with
   assert.match(script, /test -L \/workspace\/runtime\/venv/);
   for (const module of ['fitz', 'numpy', 'PIL', 'playwright']) assert.match(script, new RegExp(`(?:import |, )${module}(?:,|\\")`));
   assert.match(script, /PLAYWRIGHT_BROWSERS_PATH/);
+});
+
+test('verification accepts legacy manifest metadata without treating it as runtime input', async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), 'isolated-harness-environment-test-'));
+  const spec = parseEnvironmentSpec({ version: 'v1', name: 'drawing-review-v1', baseImage: 'codex-cli:local', pip: ['numpy'], workspaceRuntime: true });
+  await mkdir(join(stateRoot, 'environments'));
+  await writeFile(environmentManifestPath(spec.name, stateRoot), JSON.stringify({ version: 'v1', name: spec.name, image: 'isolated-harness-env-drawing-review-v1:abcdef123456', digest: environmentDigest(spec), spec: { ...spec, source: '/host/spec.json', trustedCaFile: 'host-trust.pem' } }));
+  const commands = [];
+  const spawnProcess = (_command, args) => {
+    commands.push(args);
+    const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    process.nextTick(() => child.emit('exit', 0)); return child;
+  };
+  try {
+    const receipt = await verifyEnvironment(spec.name, { stateRoot, spawnProcess });
+    assert.equal(receipt.verified, true); assert.deepEqual(receipt.imports, ['numpy']);
+    assert.ok(commands[0].includes('--network')); assert.ok(commands[0].includes('none'));
+  } finally { await rm(stateRoot, { recursive: true, force: true }); }
 });
 
 test('rejects environment values that could be interpreted as Dockerfile shell input', () => {

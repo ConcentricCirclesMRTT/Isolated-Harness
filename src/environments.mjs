@@ -108,7 +108,8 @@ export async function buildEnvironment(specPath, { runtimeSource, stateRoot = de
     const child = spawnProcess('docker', ['build', '--tag', image, '.'], { cwd: context, env: { ...process.env, ...proxy.environment }, stdio: 'inherit' });
     const exitCode = await waitForExit(child);
     if (exitCode !== 0) throw new Error(`Docker environment build exited ${exitCode}`);
-    const manifest = { version: 'v1', name: spec.name, image, digest: environmentDigest(spec), runtimeContractVersion, spec: { ...spec, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null }, builtAt: new Date().toISOString(), proxy: proxy.status, trust: trustSource };
+    const { source: _source, ...manifestSpec } = spec;
+    const manifest = { version: 'v1', name: spec.name, image, digest: environmentDigest(spec), runtimeContractVersion, spec: { ...manifestSpec, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null }, builtAt: new Date().toISOString(), proxy: proxy.status, trust: trustSource };
     await mkdir(environmentDirectory(stateRoot), { recursive: true, mode: 0o700 });
     await writeFile(environmentManifestPath(spec.name, stateRoot), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     return manifest;
@@ -151,7 +152,11 @@ export function environmentVerificationScript(spec) {
 
 export async function verifyEnvironment(name, { stateRoot = defaultStateRoot(), spawnProcess = spawn } = {}) {
   const environment = await resolveEnvironment(name, { stateRoot });
-  const spec = parseEnvironmentSpec(environment.spec);
+  // Older manifests recorded the local source path alongside the normalized
+  // spec. It is metadata, never container input; strip it while accepting the
+  // old records so users do not need to rebuild just to verify an environment.
+  const { source: _source, trustedCaFile: _trustedCaFile, ...manifestSpec } = environment.spec ?? {};
+  const spec = parseEnvironmentSpec(manifestSpec);
   const workspace = await mkdtemp(join(tmpdir(), 'isolated-harness-runtime-verify-'));
   await chmod(workspace, 0o777);
   const imports = spec.pip.map(pythonImportName).filter(Boolean);
