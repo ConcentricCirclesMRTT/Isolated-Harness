@@ -188,3 +188,10 @@ bundle for this local build. Do not publish or share an image that contains an
 organization-private certificate. The image enables
 `UV_SYSTEM_CERTS=true`, so uv reads the Linux system store. uv can alternatively
 use an explicit `SSL_CERT_FILE` PEM bundle for a single run.
+For an environment such as `drawing-review-v1`, `/workspace/runtime` is a
+container tmpfs containing links to the prepared image environment. It is not
+a directory in the host workspace. The environment's declared Python packages
+and Playwright browsers take precedence over an older bundled runtime, so a
+previous project cannot silently remove a dependency such as NumPy from a new
+agent session. An explicitly selected `--runtime` remains the deliberate
+override.

@@ -86,9 +86,7 @@ async function refreshInteractiveRegistration({ previous, skills, configPath, se
   return { skills: registeredSkills ?? { mode: 'none', skills: [] }, config: registeredConfig ?? null };
 }
 
-async function writeRuntimeAgentGuide({ workspace, destination, environment, runtime, runtimeWritable, workspaceRuntime }) {
-  let existing = '';
-  try { existing = await readFile(join(workspace, 'AGENTS.md'), 'utf8'); } catch {}
+export function renderRuntimeAgentGuide({ environment, runtime, runtimeWritable, workspaceRuntime, existing = '' }) {
   const runtimeMode = runtime ? (runtimeWritable ? 'managed-writable' : 'managed-readonly') : workspaceRuntime ? 'environment-image' : 'none';
   const lines = [
     '# Isolated Harness runtime contract',
@@ -108,7 +106,14 @@ async function writeRuntimeAgentGuide({ workspace, destination, environment, run
     '',
   ];
   if (existing.trim()) lines.push('---', '', 'Existing project instructions:', '', existing.trim(), '');
-  await writeFile(destination, `${lines.join('\n')}\n`, { mode: 0o600 });
+  return `${lines.join('\n')}\n`;
+}
+
+async function writeRuntimeAgentGuide({ workspace, destination, environment, runtime, runtimeWritable, workspaceRuntime }) {
+  let existing = '';
+  try { existing = await readFile(join(workspace, 'AGENTS.md'), 'utf8'); } catch {}
+  const guide = renderRuntimeAgentGuide({ environment, runtime, runtimeWritable, workspaceRuntime, existing });
+  await writeFile(destination, guide, { mode: 0o600 });
 }
 
 async function acquireWritableRuntime(runtime, sessionId) {

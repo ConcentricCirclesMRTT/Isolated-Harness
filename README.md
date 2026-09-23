@@ -13,6 +13,7 @@ Isolated Harness starts a real agent harness inside a container, with only the w
 ## What it isolates
 
 - **Mounted workspace.** The selected directory is bind-mounted directly, so the harness can edit the actual project. Other projects and the host home are not mounted.
+- **Prepared runtime.** Select a versioned environment such as `drawing-review-v1` to provide Python, document tooling and Chromium through `/workspace/runtime`; the directory is container-local and is not recreated or downloaded into each project workspace.
 - **Memory and state.** Each project and named session has its own agent state. One chat or project does not silently inherit another chat's history, logs, Skills, plugins or configuration.
 - **Capabilities.** Skills, MCP servers and plugins are selected deliberately. Their selected versions and sources can be recorded for an evaluation or an engineering run.
 - **Authorization.** An adapter may project the minimum authorization material required for a run, then removes that projection when the run ends. Usable credentials are not written into the mounted workspace.
