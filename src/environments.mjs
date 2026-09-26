@@ -13,6 +13,8 @@ const imageName = /^[a-z0-9][a-z0-9._/@:+-]{0,255}$/i;
 const aptPackage = /^[a-z0-9][a-z0-9+._-]{0,127}$/;
 const pipRequirement = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:==[A-Za-z0-9.*+!._-]+)?$/;
 const playwrightBrowser = new Set(['chromium', 'firefox', 'webkit']);
+const pythonVersions = new Set(['3.12']);
+const packageMirrors = new Set(['tuna']);
 // Bump this whenever the `/workspace/runtime` linkage changes. It prevents a
 // stale local image with the same dependency spec from silently retaining an
 // older runtime contract.
@@ -28,11 +30,13 @@ function normalizeStringList(value, name, matcher) {
 
 export function parseEnvironmentSpec(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) reject('ENVIRONMENT_SPEC_INVALID', 'Environment spec must be a JSON object.');
-  const allowed = new Set(['version', 'name', 'baseImage', 'apt', 'pip', 'playwright', 'workspaceRuntime', 'trustedCaFile', 'bundledRuntimeDigest']);
+  const allowed = new Set(['version', 'name', 'baseImage', 'apt', 'pip', 'playwright', 'pythonVersion', 'packageMirror', 'workspaceRuntime', 'trustedCaFile', 'bundledRuntimeDigest']);
   for (const key of Object.keys(raw)) if (!allowed.has(key)) reject('ENVIRONMENT_SPEC_UNKNOWN_FIELD', `Unknown environment field: ${key}`);
   if (raw.version !== 'v1') reject('ENVIRONMENT_SPEC_VERSION', 'Environment spec version must be "v1".');
   if (typeof raw.name !== 'string' || !environmentName.test(raw.name)) reject('ENVIRONMENT_NAME_INVALID', 'Environment name must use lowercase letters, digits, dots, underscores, or dashes.');
   if (typeof raw.baseImage !== 'string' || !imageName.test(raw.baseImage)) reject('ENVIRONMENT_BASE_IMAGE_INVALID', 'baseImage must be a safe Docker image reference.');
+  if (raw.pythonVersion !== undefined && (typeof raw.pythonVersion !== 'string' || !pythonVersions.has(raw.pythonVersion))) reject('ENVIRONMENT_PYTHON_VERSION_INVALID', 'pythonVersion must be a supported image runtime version.');
+  if (raw.packageMirror !== undefined && (typeof raw.packageMirror !== 'string' || !packageMirrors.has(raw.packageMirror))) reject('ENVIRONMENT_MIRROR_INVALID', 'packageMirror must name a supported package mirror.');
   if (raw.workspaceRuntime !== undefined && typeof raw.workspaceRuntime !== 'boolean') reject('ENVIRONMENT_RUNTIME_INVALID', 'workspaceRuntime must be a boolean.');
   if (raw.trustedCaFile !== undefined && (typeof raw.trustedCaFile !== 'string' || !raw.trustedCaFile.startsWith('/'))) reject('ENVIRONMENT_CA_INVALID', 'trustedCaFile must be an absolute PEM file path.');
   if (raw.bundledRuntimeDigest !== undefined && (typeof raw.bundledRuntimeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(raw.bundledRuntimeDigest))) reject('ENVIRONMENT_RUNTIME_DIGEST_INVALID', 'bundledRuntimeDigest must be a sha256 digest.');
@@ -41,7 +45,7 @@ export function parseEnvironmentSpec(raw) {
   if (!Array.isArray(playwright) || playwright.some(browser => typeof browser !== 'string' || !playwrightBrowser.has(browser))) reject('ENVIRONMENT_PLAYWRIGHT_INVALID', 'playwright may contain only chromium, firefox, or webkit.');
   const pip = normalizeStringList(raw.pip, 'pip', pipRequirement);
   if (playwright.length && !pip.some(requirement => requirement.split('==')[0] === 'playwright')) pip.push('playwright');
-  return { version: 'v1', name: raw.name, baseImage: raw.baseImage, apt, pip: pip.sort(), playwright: [...new Set(playwright)].sort(), workspaceRuntime: raw.workspaceRuntime ?? false, trustedCaFile: raw.trustedCaFile, bundledRuntimeDigest: raw.bundledRuntimeDigest };
+  return { version: 'v1', name: raw.name, baseImage: raw.baseImage, apt, pip: pip.sort(), playwright: [...new Set(playwright)].sort(), pythonVersion: raw.pythonVersion, packageMirror: raw.packageMirror, workspaceRuntime: raw.workspaceRuntime ?? false, trustedCaFile: raw.trustedCaFile, bundledRuntimeDigest: raw.bundledRuntimeDigest };
 }
 
 export async function loadEnvironmentSpec(path) {
@@ -54,7 +58,7 @@ export async function loadEnvironmentSpec(path) {
 }
 
 export function environmentDigest(spec) {
-  return createHash('sha256').update(JSON.stringify({ version: spec.version, runtimeContractVersion, name: spec.name, baseImage: spec.baseImage, apt: spec.apt, pip: spec.pip, playwright: spec.playwright, workspaceRuntime: spec.workspaceRuntime, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null, bundledRuntimeDigest: spec.bundledRuntimeDigest ?? null })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ version: spec.version, runtimeContractVersion, name: spec.name, baseImage: spec.baseImage, apt: spec.apt, pip: spec.pip, playwright: spec.playwright, pythonVersion: spec.pythonVersion ?? null, packageMirror: spec.packageMirror ?? null, workspaceRuntime: spec.workspaceRuntime, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null, bundledRuntimeDigest: spec.bundledRuntimeDigest ?? null })).digest('hex');
 }
 export function environmentImage(spec) { return `isolated-harness-env-${spec.name}:${environmentDigest(spec).slice(0, 12)}`; }
 export function environmentDirectory(stateRoot = defaultStateRoot()) { return join(stateRoot, 'environments'); }
@@ -64,13 +68,22 @@ export function environmentManifestPath(name, stateRoot = defaultStateRoot()) {
 }
 
 export function renderEnvironmentDockerfile(spec, { includeTrustedCa = Boolean(spec.trustedCaFile), bundledRuntime = false } = {}) {
-  const apt = [...spec.apt, ...(spec.pip.length ? ['python3', 'python3-venv', 'ca-certificates'] : []), ...(includeTrustedCa ? ['ca-certificates'] : [])];
-  const lines = [`FROM ${spec.baseImage}`, 'USER root'];
-  if (apt.length) lines.push(`RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ${[...new Set(apt)].join(' ')} && rm -rf /var/lib/apt/lists/*`);
-  if (includeTrustedCa) lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
+  const apt = [...spec.apt, ...(spec.pip.length && !spec.pythonVersion ? ['python3', 'python3-venv'] : []), ...(spec.pip.length || includeTrustedCa ? ['ca-certificates'] : [])];
+  const lines = [...(spec.pythonVersion ? [`FROM python:${spec.pythonVersion}-slim-bookworm AS isolated-harness-python`] : []), `FROM ${spec.baseImage}`, 'USER root'];
+  if (spec.packageMirror === 'tuna' && apt.length) lines.push('RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*');
+  if (includeTrustedCa && spec.packageMirror === 'tuna') lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
+  if (spec.packageMirror === 'tuna') lines.push("RUN for source in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do [ -f \"$source\" ] || continue; sed -i -E 's#https?://deb.debian.org/debian([[:space:]]|$)#https://mirrors.tuna.tsinghua.edu.cn/debian\\1#g' \"$source\"; done", 'ENV PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple');
+  if (spec.pythonVersion) lines.push('COPY --from=isolated-harness-python /usr/local /usr/local');
+  const packages = spec.packageMirror === 'tuna' ? apt.filter(item => item !== 'ca-certificates') : apt;
+  if (packages.length) lines.push(`RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ${[...new Set(packages)].join(' ')} && rm -rf /var/lib/apt/lists/*`);
+  if (includeTrustedCa && spec.packageMirror !== 'tuna') lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
   if (spec.pip.length) lines.push('RUN python3 -m venv /opt/isolated-harness/python && /opt/isolated-harness/python/bin/pip install --no-cache-dir --disable-pip-version-check ' + spec.pip.join(' '), 'ENV VIRTUAL_ENV=/opt/isolated-harness/python', 'ENV PATH=/opt/isolated-harness/python/bin:${PATH}', 'ENV UV_SYSTEM_CERTS=true');
-  if (spec.playwright.length) lines.push(`RUN PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright /opt/isolated-harness/python/bin/python -m playwright install --with-deps ${spec.playwright.join(' ')}`, 'ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright');
   if (bundledRuntime) lines.push('COPY bundled-runtime /opt/isolated-harness/bundled-runtime');
+  if (spec.playwright.length) {
+    if (bundledRuntime) lines.push(`RUN mkdir -p /opt/ms-playwright && cp -a /opt/isolated-harness/bundled-runtime/browsers/. /opt/ms-playwright/ && /opt/isolated-harness/python/bin/python -m playwright install-deps ${spec.playwright.join(' ')}`);
+    else lines.push(`RUN PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright /opt/isolated-harness/python/bin/python -m playwright install --with-deps ${spec.playwright.join(' ')}`);
+    lines.push('ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright');
+  }
   if (spec.workspaceRuntime) lines.push("RUN printf '%s\\n' '#!/bin/sh' 'set -eu' 'runtime=/workspace/runtime' 'managed=${ISOLATED_HARNESS_MANAGED_RUNTIME:-}' 'bundled=/opt/isolated-harness/bundled-runtime' 'image_python=/opt/isolated-harness/python' 'if [ -n \"$managed\" ]; then' '  ln -sfn \"$managed/python\" \"$runtime/python\"' '  ln -sfn \"$managed/venv\" \"$runtime/venv\"' '  [ -e \"$managed/pillow\" ] && ln -sfn \"$managed/pillow\" \"$runtime/pillow\" || true' '  browser_source=\"$managed/browsers\"' 'elif [ -d \"$image_python\" ]; then' '  # The environment image contains the declared dependency set. A bundled runtime may be older, so it is a fallback, never an implicit override.' '  ln -sfn \"$image_python\" \"$runtime/python\"' '  ln -sfn \"$image_python\" \"$runtime/venv\"' '  browser_source=/opt/ms-playwright' 'elif [ -d \"$bundled\" ]; then' '  ln -sfn \"$bundled/python\" \"$runtime/python\"' '  ln -sfn \"$bundled/venv\" \"$runtime/venv\"' '  [ -e \"$bundled/pillow\" ] && ln -sfn \"$bundled/pillow\" \"$runtime/pillow\" || true' '  browser_source=\"$bundled/browsers\"' 'else' '  browser_source=/opt/ms-playwright' 'fi' 'mkdir -p \"$runtime/browsers/.links\"' 'for component in \"$browser_source\"/*; do' '  [ -e \"$component\" ] || continue' '  ln -sfn \"$component\" \"$runtime/browsers/$(basename \"$component\")\"' 'done' 'exec \"$@\"' > /usr/local/bin/isolated-harness-runtime && chmod 0755 /usr/local/bin/isolated-harness-runtime", 'ENTRYPOINT ["/usr/local/bin/isolated-harness-runtime"]');
   lines.push('USER node', 'CMD ["codex"]', '');
   return lines.join('\n');

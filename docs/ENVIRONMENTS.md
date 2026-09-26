@@ -5,6 +5,12 @@ It keeps system packages and Python dependencies outside the mounted workspace.
 The base Codex image remains immutable; a selected environment adds declared
 dependencies in a Docker build layer.
 
+`pythonVersion: "3.12"` copies the official Python 3.12 runtime into the
+environment image while retaining the Codex base image. `packageMirror:
+"tuna"` configures the Tsinghua Debian mirror for ordinary Debian packages and
+the Tsinghua PyPI mirror for pip; Debian security updates remain on the
+official security repository.
+
 ## Environment specification
 
 Environment specifications use JSON so the package requires no YAML parser.
@@ -16,6 +22,8 @@ accepted; arbitrary shell commands, URLs, and Dockerfile fragments are not.
   "version": "v1",
   "name": "drawing-review-v1",
   "baseImage": "codex-cli:local",
+  "pythonVersion": "3.12",
+  "packageMirror": "tuna",
   "apt": ["poppler-utils", "libnss3"],
   "pip": ["jsonschema", "pymupdf"],
   "playwright": ["chromium"]
