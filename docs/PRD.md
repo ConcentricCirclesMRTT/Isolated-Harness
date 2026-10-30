@@ -257,7 +257,8 @@ filesystem mount validation.
 
 The initial adapter must:
 
-- run the installed/pinned Codex CLI in the selected container image;
+- run the selected verified Codex program release (automatic updates by
+  default, with explicit version pinning); the image supplies a fallback;
 - point `CODEX_HOME` to the new session-local home;
 - use the default `host-codex` credential bridge so an already authenticated
   host Codex session is usable without a second login;

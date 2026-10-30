@@ -1,12 +1,13 @@
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RunnerValidationError } from './errors.mjs';
 import { defaultStateRoot } from './run.mjs';
 import { readMacOsTrustBundle, resolveHostProxy } from './network.mjs';
+import { dockerOutput, inspectImage } from './images.mjs';
 
 const environmentName = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const imageName = /^[a-z0-9][a-z0-9._/@:+-]{0,255}$/i;
@@ -18,7 +19,7 @@ const packageMirrors = new Set(['tuna']);
 // Bump this whenever the `/workspace/runtime` linkage changes. It prevents a
 // stale local image with the same dependency spec from silently retaining an
 // older runtime contract.
-const runtimeContractVersion = 'v2';
+const runtimeContractVersion = 'v3';
 const waitForExit = child => new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', code => resolveExit(code)); });
 
 function reject(code, message) { throw new RunnerValidationError(code, message); }
@@ -45,7 +46,7 @@ export function parseEnvironmentSpec(raw) {
   if (!Array.isArray(playwright) || playwright.some(browser => typeof browser !== 'string' || !playwrightBrowser.has(browser))) reject('ENVIRONMENT_PLAYWRIGHT_INVALID', 'playwright may contain only chromium, firefox, or webkit.');
   const pip = normalizeStringList(raw.pip, 'pip', pipRequirement);
   if (playwright.length && !pip.some(requirement => requirement.split('==')[0] === 'playwright')) pip.push('playwright');
-  return { version: 'v1', name: raw.name, baseImage: raw.baseImage, apt, pip: pip.sort(), playwright: [...new Set(playwright)].sort(), pythonVersion: raw.pythonVersion, packageMirror: raw.packageMirror, workspaceRuntime: raw.workspaceRuntime ?? false, trustedCaFile: raw.trustedCaFile, bundledRuntimeDigest: raw.bundledRuntimeDigest };
+  return { version: 'v1', name: raw.name, baseImage: raw.baseImage, apt, pip: pip.sort(), playwright: [...new Set(playwright)].sort(), pythonVersion: raw.pythonVersion, packageMirror: raw.packageMirror, workspaceRuntime: raw.workspaceRuntime ?? Boolean(pip.length || playwright.length), trustedCaFile: raw.trustedCaFile, bundledRuntimeDigest: raw.bundledRuntimeDigest };
 }
 
 export async function loadEnvironmentSpec(path) {
@@ -57,74 +58,163 @@ export async function loadEnvironmentSpec(path) {
   return { ...spec, source };
 }
 
-export function environmentDigest(spec) {
-  return createHash('sha256').update(JSON.stringify({ version: spec.version, runtimeContractVersion, name: spec.name, baseImage: spec.baseImage, apt: spec.apt, pip: spec.pip, playwright: spec.playwright, pythonVersion: spec.pythonVersion ?? null, packageMirror: spec.packageMirror ?? null, workspaceRuntime: spec.workspaceRuntime, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null, bundledRuntimeDigest: spec.bundledRuntimeDigest ?? null })).digest('hex');
+const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+// Runtime dependencies have their own identity. Neither an environment's name
+// nor the Codex version should invalidate several GB of Python/browser layers.
+export function dependencyDigest(spec) {
+  return hash({ base: spec.baseImage === 'codex-cli:local' ? 'node:22-bookworm-slim' : spec.baseImage, apt: spec.apt, pip: spec.pip, playwright: spec.playwright, pythonVersion: spec.pythonVersion ?? null, packageMirror: spec.packageMirror ?? null, bundledRuntimeDigest: spec.bundledRuntimeDigest ?? null });
 }
-export function environmentImage(spec) { return `isolated-harness-env-${spec.name}:${environmentDigest(spec).slice(0, 12)}`; }
+export function environmentDigest(spec, identity = {}) {
+  return hash({ version: spec.version, runtimeContractVersion, dependencies: dependencyDigest(spec), workspaceRuntime: spec.workspaceRuntime, ...identity });
+}
+export function environmentImage(spec, identity) { return `isolated-harness-env-${spec.name}:${environmentDigest(spec, identity).slice(0, 12)}`; }
 export function environmentDirectory(stateRoot = defaultStateRoot()) { return join(stateRoot, 'environments'); }
 export function environmentManifestPath(name, stateRoot = defaultStateRoot()) {
   if (!environmentName.test(name)) reject('ENVIRONMENT_NAME_INVALID', 'Environment name is invalid.');
   return join(environmentDirectory(stateRoot), `${name}.json`);
 }
 
-export function renderEnvironmentDockerfile(spec, { includeTrustedCa = Boolean(spec.trustedCaFile), bundledRuntime = false } = {}) {
+export function renderEnvironmentDockerfile(spec, { includeTrustedCa = Boolean(spec.trustedCaFile), bundledRuntime = false, runtimeImage, repairBrowsers = false, baseImage = spec.baseImage } = {}) {
   const apt = [...spec.apt, ...(spec.pip.length && !spec.pythonVersion ? ['python3', 'python3-venv'] : []), ...(spec.pip.length || includeTrustedCa ? ['ca-certificates'] : [])];
-  const lines = [...(spec.pythonVersion ? [`FROM python:${spec.pythonVersion}-slim-bookworm AS isolated-harness-python`] : []), `FROM ${spec.baseImage}`, 'USER root'];
-  if (spec.packageMirror === 'tuna' && apt.length) lines.push('RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*');
-  if (includeTrustedCa && spec.packageMirror === 'tuna') lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
-  if (spec.packageMirror === 'tuna') lines.push("RUN for source in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do [ -f \"$source\" ] || continue; sed -i -E 's#https?://deb.debian.org/debian([[:space:]]|$)#https://mirrors.tuna.tsinghua.edu.cn/debian\\1#g' \"$source\"; done", 'ENV PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple');
-  if (spec.pythonVersion) lines.push('COPY --from=isolated-harness-python /usr/local /usr/local');
-  const packages = spec.packageMirror === 'tuna' ? apt.filter(item => item !== 'ca-certificates') : apt;
-  if (packages.length) lines.push(`RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ${[...new Set(packages)].join(' ')} && rm -rf /var/lib/apt/lists/*`);
-  if (includeTrustedCa && spec.packageMirror !== 'tuna') lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
-  if (spec.pip.length) lines.push('RUN python3 -m venv /opt/isolated-harness/python && /opt/isolated-harness/python/bin/pip install --no-cache-dir --disable-pip-version-check ' + spec.pip.join(' '), 'ENV VIRTUAL_ENV=/opt/isolated-harness/python', 'ENV PATH=/opt/isolated-harness/python/bin:${PATH}', 'ENV UV_SYSTEM_CERTS=true');
-  if (bundledRuntime) lines.push('COPY bundled-runtime /opt/isolated-harness/bundled-runtime');
-  if (spec.playwright.length) {
-    if (bundledRuntime) lines.push(`RUN mkdir -p /opt/ms-playwright && cp -a /opt/isolated-harness/bundled-runtime/browsers/. /opt/ms-playwright/ && /opt/isolated-harness/python/bin/python -m playwright install-deps ${spec.playwright.join(' ')}`);
-    else lines.push(`RUN PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright /opt/isolated-harness/python/bin/python -m playwright install --with-deps ${spec.playwright.join(' ')}`);
-    lines.push('ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright');
+  const separateCodex = spec.baseImage === 'codex-cli:local';
+  const lines = [...(separateCodex ? [`FROM ${baseImage} AS isolated-harness-codex`] : []), ...(!runtimeImage && spec.pythonVersion ? [`FROM python:${spec.pythonVersion}-slim-bookworm AS isolated-harness-python`] : []), `FROM ${runtimeImage ?? (separateCodex ? 'node:22-bookworm-slim' : baseImage)} AS isolated-harness-dependencies`, 'USER root', 'ARG TARGETOS', 'ARG TARGETARCH'];
+  if (!runtimeImage) {
+    if (spec.packageMirror === 'tuna' && apt.length) lines.push('RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*');
+    if (includeTrustedCa && spec.packageMirror === 'tuna') lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
+    if (spec.packageMirror === 'tuna') lines.push("RUN for source in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do [ -f \"$source\" ] || continue; sed -i -E 's#https?://deb.debian.org/debian([[:space:]]|$)#https://mirrors.tuna.tsinghua.edu.cn/debian\\1#g' \"$source\"; done", 'ENV PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple');
+    if (spec.pythonVersion) lines.push('COPY --from=isolated-harness-python /usr/local /usr/local');
+    const packages = spec.packageMirror === 'tuna' ? apt.filter(item => item !== 'ca-certificates') : apt;
+    if (packages.length) lines.push(`RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ${[...new Set(packages)].join(' ')} && rm -rf /var/lib/apt/lists/*`);
+    if (includeTrustedCa && spec.packageMirror !== 'tuna') lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt', 'RUN update-ca-certificates');
+    if (spec.pip.length) lines.push('RUN --mount=type=cache,id=isolated-harness-pip,target=/root/.cache/pip,sharing=locked python3 -m venv /opt/isolated-harness/python && /opt/isolated-harness/python/bin/pip install --disable-pip-version-check ' + spec.pip.join(' '));
+    if (spec.playwright.length) {
+      if (bundledRuntime) lines.push('COPY bundled-runtime/browsers /opt/ms-playwright');
+      // This cache is build-only. Sessions use immutable image layers.
+      lines.push(`RUN --mount=type=cache,id=isolated-harness-browsers-\${TARGETOS}-\${TARGETARCH},target=/var/cache/isolated-harness-browsers,sharing=locked ${bundledRuntime ? 'cp -a /opt/ms-playwright/. /var/cache/isolated-harness-browsers/ && ' : ''}PLAYWRIGHT_SKIP_BROWSER_GC=1 NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt PLAYWRIGHT_BROWSERS_PATH=/var/cache/isolated-harness-browsers /opt/isolated-harness/python/bin/python -m playwright install --with-deps ${spec.playwright.join(' ')} && mkdir -p /opt/ms-playwright && cp -a /var/cache/isolated-harness-browsers/. /opt/ms-playwright/`);
+      lines.push('ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright');
+    }
   }
-  if (spec.workspaceRuntime) lines.push("RUN printf '%s\\n' '#!/bin/sh' 'set -eu' 'runtime=/workspace/runtime' 'managed=${ISOLATED_HARNESS_MANAGED_RUNTIME:-}' 'bundled=/opt/isolated-harness/bundled-runtime' 'image_python=/opt/isolated-harness/python' 'if [ -n \"$managed\" ]; then' '  ln -sfn \"$managed/python\" \"$runtime/python\"' '  ln -sfn \"$managed/venv\" \"$runtime/venv\"' '  [ -e \"$managed/pillow\" ] && ln -sfn \"$managed/pillow\" \"$runtime/pillow\" || true' '  browser_source=\"$managed/browsers\"' 'elif [ -d \"$image_python\" ]; then' '  # The environment image contains the declared dependency set. A bundled runtime may be older, so it is a fallback, never an implicit override.' '  ln -sfn \"$image_python\" \"$runtime/python\"' '  ln -sfn \"$image_python\" \"$runtime/venv\"' '  browser_source=/opt/ms-playwright' 'elif [ -d \"$bundled\" ]; then' '  ln -sfn \"$bundled/python\" \"$runtime/python\"' '  ln -sfn \"$bundled/venv\" \"$runtime/venv\"' '  [ -e \"$bundled/pillow\" ] && ln -sfn \"$bundled/pillow\" \"$runtime/pillow\" || true' '  browser_source=\"$bundled/browsers\"' 'else' '  browser_source=/opt/ms-playwright' 'fi' 'mkdir -p \"$runtime/browsers/.links\"' 'for component in \"$browser_source\"/*; do' '  [ -e \"$component\" ] || continue' '  ln -sfn \"$component\" \"$runtime/browsers/$(basename \"$component\")\"' 'done' 'exec \"$@\"' > /usr/local/bin/isolated-harness-runtime && chmod 0755 /usr/local/bin/isolated-harness-runtime", 'ENTRYPOINT ["/usr/local/bin/isolated-harness-runtime"]');
+  if (runtimeImage) {
+    // Trust is local configuration, not a Python/browser dependency. A CA
+    // change must not cause the whole runtime to be downloaded again.
+    lines.push('RUN rm -f /usr/local/share/ca-certificates/isolated-harness.crt');
+    if (includeTrustedCa) lines.push('COPY trusted-ca.pem /usr/local/share/ca-certificates/isolated-harness.crt');
+    lines.push('RUN if command -v update-ca-certificates >/dev/null; then update-ca-certificates --fresh; fi');
+    if (repairBrowsers && spec.playwright.length) lines.push(`RUN --mount=type=cache,id=isolated-harness-browsers-\${TARGETOS}-\${TARGETARCH},target=/var/cache/isolated-harness-browsers,sharing=locked cp -a /opt/ms-playwright/. /var/cache/isolated-harness-browsers/ && PLAYWRIGHT_SKIP_BROWSER_GC=1 NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt PLAYWRIGHT_BROWSERS_PATH=/var/cache/isolated-harness-browsers /opt/isolated-harness/python/bin/python -m playwright install ${spec.playwright.join(' ')} && cp -a /var/cache/isolated-harness-browsers/. /opt/ms-playwright/`);
+  }
+  if (spec.pip.length) lines.push('ENV VIRTUAL_ENV=/opt/isolated-harness/python', 'ENV PATH=/opt/isolated-harness/python/bin:${PATH}', 'ENV UV_SYSTEM_CERTS=true');
+  if (spec.playwright.length) lines.push('ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright');
+  lines.push('FROM isolated-harness-dependencies AS isolated-harness-environment');
+  if (separateCodex) lines.push('COPY --from=isolated-harness-codex /usr/local/lib/node_modules/@openai/codex /usr/local/lib/node_modules/@openai/codex', 'RUN ln -sf /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex');
+  if (spec.workspaceRuntime) lines.push('COPY runtime-entrypoint.sh /usr/local/bin/isolated-harness-runtime', 'RUN chmod 0755 /usr/local/bin/isolated-harness-runtime', 'ENTRYPOINT ["/usr/local/bin/isolated-harness-runtime"]');
+  else lines.push('ENTRYPOINT []');
   lines.push('USER node', 'CMD ["codex"]', '');
   return lines.join('\n');
 }
 
+function savedSpec(manifest) {
+  const { source: _source, trustedCaFile: _ca, ...raw } = manifest.spec ?? {};
+  return parseEnvironmentSpec(raw);
+}
+
 export async function buildEnvironment(specPath, { runtimeSource, stateRoot = defaultStateRoot(), spawnProcess = spawn, resolveProxy = resolveHostProxy, readTrustBundle = readMacOsTrustBundle } = {}) {
   let spec = await loadEnvironmentSpec(specPath);
-  let bundledRuntime;
+  const existing = await listEnvironments({ stateRoot });
+  const previous = existing.find(item => item.name === spec.name);
+  // Preserve an existing browser seed across ordinary rebuilds. The final
+  // image uses its declared Python packages, never the seed's older virtualenv.
+  if (!runtimeSource && previous?.spec?.bundledRuntimeDigest) spec.bundledRuntimeDigest = previous.spec.bundledRuntimeDigest;
   if (runtimeSource) {
     const source = resolve(runtimeSource);
-    for (const required of ['browsers', 'venv', 'python']) { try { if (!(await stat(join(source, required))).isDirectory()) throw new Error(); } catch { reject('ENVIRONMENT_RUNTIME_SOURCE_INVALID', `Bundled runtime is missing ${required}/: ${source}`); } }
-    let runtimeManifest; try { runtimeManifest = JSON.parse(await readFile(join(source, 'runtime.json'), 'utf8')); } catch { reject('ENVIRONMENT_RUNTIME_SOURCE_INVALID', `Bundled runtime must contain runtime.json: ${source}`); }
-    if (!/^[a-f0-9]{64}$/.test(runtimeManifest.digest ?? '')) reject('ENVIRONMENT_RUNTIME_SOURCE_INVALID', `Bundled runtime manifest has no valid digest: ${source}`);
-    bundledRuntime = source;
-    spec = { ...spec, bundledRuntimeDigest: runtimeManifest.digest };
+    for (const required of ['browsers', 'venv', 'python']) {
+      try { if (!(await stat(join(source, required))).isDirectory()) throw new Error(); }
+      catch { reject('ENVIRONMENT_RUNTIME_SOURCE_INVALID', `Bundled runtime is missing ${required}/: ${source}`); }
+    }
+    const manifest = JSON.parse(await readFile(join(source, 'runtime.json'), 'utf8'));
+    if (!/^[a-f0-9]{64}$/.test(manifest.digest ?? '')) reject('ENVIRONMENT_RUNTIME_SOURCE_INVALID', 'Bundled runtime manifest has no valid digest.');
+    spec.bundledRuntimeDigest = manifest.digest;
+    runtimeSource = source;
   }
-  if (spec.trustedCaFile) {
-    let certificate;
-    try { certificate = await stat(spec.trustedCaFile); } catch { reject('ENVIRONMENT_CA_MISSING', `Trusted CA file does not exist: ${spec.trustedCaFile}`); }
-    if (!certificate.isFile()) reject('ENVIRONMENT_CA_INVALID', 'trustedCaFile must name a regular PEM file.');
-  }
-  const image = environmentImage(spec);
+  const base = await inspectImage(spec.baseImage, { spawnProcess });
   const context = await mkdtemp(join(tmpdir(), 'isolated-harness-environment-'));
   try {
     const proxy = await resolveProxy();
-    let trustSource = 'none';
-    let trustBundle;
-    if (spec.trustedCaFile) { await copyFile(spec.trustedCaFile, join(context, 'trusted-ca.pem')); trustSource = 'explicit-file'; }
-    else if (proxy.status === 'configured') {
-      trustBundle = await readTrustBundle();
-      if (trustBundle) { await writeFile(join(context, 'trusted-ca.pem'), trustBundle, { mode: 0o600 }); trustSource = 'host-keychain'; }
+    const trustBundle = spec.trustedCaFile ? await readFile(spec.trustedCaFile, 'utf8') : proxy.status === 'configured' ? await readTrustBundle() : undefined;
+    const trust = trustBundle ? (spec.trustedCaFile ? 'explicit-file' : 'host-keychain') : 'none';
+    const trustDigest = trustBundle ? createHash('sha256').update(trustBundle).digest('hex') : null;
+    const dependencies = dependencyDigest(spec);
+    const runtimeDigest = hash({ dependencies, platform: base.platform });
+    const identity = { baseImageId: base.id, platform: base.platform, trustDigest };
+    // A failed replacement must never overwrite the tag selected by an older
+    // manifest, even when inputs are identical (e.g. an unpinned rebuild).
+    const image = `${environmentImage(spec, identity)}-${randomUUID().slice(0, 8)}`;
+    const digest = environmentDigest(spec, identity);
+    if (previous?.digest === digest && previous.runtimeImage) {
+      const available = await inspectImage(previous.image, { spawnProcess }).catch(() => null);
+      if (available && (!previous.imageId || available.id === previous.imageId)) return { ...previous, reused: true };
     }
-    if (bundledRuntime) await cp(bundledRuntime, join(context, 'bundled-runtime'), { recursive: true, dereference: false });
-    await writeFile(join(context, 'Dockerfile'), renderEnvironmentDockerfile(spec, { includeTrustedCa: trustSource !== 'none', bundledRuntime: Boolean(bundledRuntime) }), { mode: 0o600 });
-    const child = spawnProcess('docker', ['build', '--tag', image, '.'], { cwd: context, env: { ...process.env, ...proxy.environment }, stdio: 'inherit' });
-    const exitCode = await waitForExit(child);
-    if (exitCode !== 0) throw new Error(`Docker environment build exited ${exitCode}`);
+    let runtimeImage;
+    let repairBrowsers = false;
+    for (const candidate of existing) {
+      let candidateSpec;
+      try { candidateSpec = savedSpec(candidate); } catch { continue; }
+      if (dependencyDigest(candidateSpec) !== dependencies) continue;
+      if (spec.baseImage !== 'codex-cli:local' && candidate.baseImageId !== base.id) continue;
+      // Reuse the dependency snapshot, never stack a previous final Codex
+      // image on every upgrade. Legacy snapshots are accepted for migration.
+      const legacySnapshot = `isolated-harness-runtime:${runtimeDigest.slice(0, 24)}`;
+      const source = candidate.runtimeImage ?? legacySnapshot;
+      let available = await inspectImage(source, { spawnProcess }).catch(() => null);
+      if (available && candidate.runtimeImageId && candidate.runtimeImageId !== available.id) continue;
+      if (!available) {
+        available = await inspectImage(candidate.image, { spawnProcess }).catch(() => null);
+        if (available && candidate.imageId && candidate.imageId !== available.id) continue;
+      }
+      if (!available || available.platform !== base.platform) continue;
+      runtimeImage = `isolated-harness-runtime-source:${available.id.replace('sha256:', '')}`;
+      repairBrowsers = !candidate.runtimeImage || candidate.runtimeContractVersion !== runtimeContractVersion;
+      await dockerOutput(['tag', available.id, runtimeImage], { spawnProcess });
+      break;
+    }
+    if (!runtimeImage && spec.bundledRuntimeDigest && !runtimeSource) {
+      // Locate a previously imported seed only if a fresh dependency build is
+      // necessary. Never silently drop a declared artifact.
+      const { listRuntimes } = await import('./runtimes.mjs');
+      runtimeSource = (await listRuntimes({ stateRoot })).find(item => item.digest === spec.bundledRuntimeDigest)?.path;
+      if (!runtimeSource) reject('ENVIRONMENT_RUNTIME_SOURCE_MISSING', 'The previous browser seed is unavailable. Supply --runtime-source, or reset this environment and build again to stop using that seed.');
+    }
+    const baseImage = `isolated-harness-base:${base.id.replace('sha256:', '')}`;
+    await dockerOutput(['tag', base.id, baseImage], { spawnProcess });
+    if (trustBundle) await writeFile(join(context, 'trusted-ca.pem'), trustBundle, { mode: 0o600 });
+    if (runtimeSource && !runtimeImage && spec.playwright.length) await cp(join(runtimeSource, 'browsers'), join(context, 'bundled-runtime/browsers'), { recursive: true, dereference: false });
+    await copyFile(fileURLToPath(new URL('./runtime-entrypoint.sh', import.meta.url)), join(context, 'runtime-entrypoint.sh'));
+    await writeFile(join(context, 'Dockerfile'), renderEnvironmentDockerfile(spec, { includeTrustedCa: Boolean(trustBundle), bundledRuntime: Boolean(runtimeSource), runtimeImage, repairBrowsers, baseImage }), { mode: 0o600 });
+    const runtimeBuildTag = `isolated-harness-runtime-build:${randomUUID()}`;
+    const build = async (tag, target) => {
+      const args = ['build', '--tag', tag];
+      if (target) args.push('--target', target);
+      for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY']) if (proxy.environment[key]) args.push('--build-arg', `${key}=${proxy.environment[key]}`);
+      args.push('.');
+      const child = spawnProcess('docker', args, { cwd: context, env: { ...process.env, DOCKER_BUILDKIT: '1' }, stdio: ['ignore', 'inherit', 'inherit'] });
+      const exitCode = await waitForExit(child);
+      if (exitCode !== 0) throw new Error(`Docker environment build exited ${exitCode}`);
+    };
+    await build(runtimeBuildTag, 'isolated-harness-dependencies');
+    const snapshot = await inspectImage(runtimeBuildTag, { spawnProcess });
+    const runtimeSnapshot = `isolated-harness-runtime:${snapshot.id.replace('sha256:', '')}`;
+    await dockerOutput(['tag', snapshot.id, runtimeSnapshot], { spawnProcess });
+    await dockerOutput(['image', 'rm', runtimeBuildTag], { spawnProcess });
+    await build(image);
+    const built = await inspectImage(image, { spawnProcess });
     const { source: _source, ...manifestSpec } = spec;
-    const manifest = { version: 'v1', name: spec.name, image, digest: environmentDigest(spec), runtimeContractVersion, spec: { ...manifestSpec, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null }, builtAt: new Date().toISOString(), proxy: proxy.status, trust: trustSource };
+    const manifest = { version: 'v1', name: spec.name, image, imageId: built.id, digest, runtimeContractVersion, runtimeDigest, runtimeImage: runtimeSnapshot, runtimeImageId: snapshot.id, dependencies, baseImageId: base.id, codexVersion: base.codexVersion, platform: base.platform, trustDigest, runtimeReused: Boolean(runtimeImage), spec: { ...manifestSpec, trustedCaFile: spec.trustedCaFile ? basename(spec.trustedCaFile) : null }, builtAt: new Date().toISOString(), proxy: proxy.status, trust };
+    // Publish only after the new image passes the no-network runtime proof.
+    await verifyEnvironmentImage(manifest, { spawnProcess });
     await mkdir(environmentDirectory(stateRoot), { recursive: true, mode: 0o700 });
-    await writeFile(environmentManifestPath(spec.name, stateRoot), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    const destination = environmentManifestPath(spec.name, stateRoot);
+    const staging = `${destination}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(staging, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    await rename(staging, destination);
     return manifest;
   } finally { await rm(context, { recursive: true, force: true }); }
 }
@@ -151,44 +241,47 @@ const pythonImportName = requirement => ({ pymupdf: 'fitz', pillow: 'PIL' }[requ
 /** A no-network proof that the runtime links and declared dependencies are usable.
  * Keep this generated from the environment spec so the test cannot accidentally
  * drift from the image contract that the agent receives. */
-export function environmentVerificationScript(spec) {
-  const imports = (spec.pip ?? []).map(pythonImportName).filter(Boolean);
-  const checks = [
-    'test -L /workspace/runtime/venv',
-    'test -L /workspace/runtime/python',
-    'test -x /workspace/runtime/venv/bin/python',
-    imports.length ? `/workspace/runtime/venv/bin/python -c ${JSON.stringify(`import ${imports.join(', ')}`)}` : 'true',
-    (spec.playwright ?? []).length ? 'test -d "$PLAYWRIGHT_BROWSERS_PATH" && find "$PLAYWRIGHT_BROWSERS_PATH" -mindepth 1 -maxdepth 1 -type d | grep -q .' : 'true',
-  ];
+const shellQuote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+
+export function environmentVerificationScript(spec, { codexVersion } = {}) {
+  const python = spec.workspaceRuntime ? '/workspace/runtime/venv/bin/python' : '/opt/isolated-harness/python/bin/python';
+  const code = spec.pip.map(pythonImportName).map(name => `import ${name}`);
+  if (spec.playwright.length) {
+    code.push('from playwright.sync_api import sync_playwright', 'with sync_playwright() as p:');
+    for (const browser of spec.playwright) code.push(`    browser = p.${browser}.launch(headless=True)`, '    browser.close()');
+  }
+  const checks = ['mkdir -p /tmp/isolated-harness-home', 'export HOME=/tmp/isolated-harness-home'];
+  if (spec.workspaceRuntime && spec.pip.length) checks.push('test -L /workspace/runtime/venv', 'test -L /workspace/runtime/python', `test -x ${python}`);
+  if (code.length) checks.push(`${python} -c ${shellQuote(code.join('\n'))}`);
+  if (codexVersion) checks.push(`test "$(codex --version)" = ${shellQuote(`codex-cli ${codexVersion}`)}`);
   return checks.join(' && ');
 }
 
-export async function verifyEnvironment(name, { stateRoot = defaultStateRoot(), spawnProcess = spawn } = {}) {
-  const environment = await resolveEnvironment(name, { stateRoot });
-  // Older manifests recorded the local source path alongside the normalized
-  // spec. It is metadata, never container input; strip it while accepting the
-  // old records so users do not need to rebuild just to verify an environment.
-  const { source: _source, trustedCaFile: _trustedCaFile, ...manifestSpec } = environment.spec ?? {};
-  const spec = parseEnvironmentSpec(manifestSpec);
+async function verifyEnvironmentImage(environment, { spawnProcess = spawn } = {}) {
+  const spec = savedSpec(environment);
   const workspace = await mkdtemp(join(tmpdir(), 'isolated-harness-runtime-verify-'));
   await chmod(workspace, 0o777);
   const imports = spec.pip.map(pythonImportName).filter(Boolean);
   try {
     const args = [
       'run', '--rm', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--network', 'none', '--user=1000:1000', '--workdir', '/workspace',
-      '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', '--tmpfs', '/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m',
+      '--tmpfs', '/tmp:rw,noexec,nosuid,size=256m',
       '--mount', `type=bind,src=${workspace},dst=/workspace`,
-      '--env', 'ISOLATED_HARNESS_RUNTIME_MODE=environment-image', '--env', 'ISOLATED_HARNESS_RUNTIME_PATH=/workspace/runtime', '--env', 'PLAYWRIGHT_BROWSERS_PATH=/workspace/runtime/browsers',
-      environment.image, 'sh', '-lc', environmentVerificationScript(spec),
     ];
+    if (spec.workspaceRuntime) args.push('--tmpfs', '/workspace/runtime:rw,noexec,nosuid,nodev,mode=1777,size=16m', '--env', 'ISOLATED_HARNESS_RUNTIME_MODE=environment-image', '--env', 'ISOLATED_HARNESS_RUNTIME_PATH=/workspace/runtime', '--env', 'PLAYWRIGHT_BROWSERS_PATH=/workspace/runtime/browsers');
+    args.push(environment.image, 'sh', '-c', environmentVerificationScript(spec, environment));
     const child = spawnProcess('docker', args, { stdio: 'pipe' });
     let stdout = '', stderr = '';
     child.stdout?.on('data', value => { stdout += value; });
     child.stderr?.on('data', value => { stderr += value; });
     const exitCode = await waitForExit(child);
-    if (exitCode !== 0) throw new RunnerValidationError('ENVIRONMENT_VERIFY_FAILED', `Environment ${name} is not ready: ${(stderr || stdout || `Docker exited ${exitCode}`).trim().slice(0, 1000)}`);
-    return { verified: true, verifiedAt: new Date().toISOString(), name: environment.name, image: environment.image, digest: environment.digest, runtimeContractVersion: environment.runtimeContractVersion ?? 'v1', imports, browsers: spec.playwright, network: 'none' };
+    if (exitCode !== 0) throw new RunnerValidationError('ENVIRONMENT_VERIFY_FAILED', `Environment ${environment.name} is not ready: ${(stderr || stdout || `Docker exited ${exitCode}`).trim().slice(0, 2000)}`);
+    return { verified: true, verifiedAt: new Date().toISOString(), name: environment.name, image: environment.image, digest: environment.digest, codexVersion: environment.codexVersion ?? null, runtimeContractVersion: environment.runtimeContractVersion ?? 'v1', imports, browsers: spec.playwright, network: 'none' };
   } finally { await rm(workspace, { recursive: true, force: true }); }
+}
+
+export async function verifyEnvironment(name, { stateRoot = defaultStateRoot(), spawnProcess = spawn } = {}) {
+  return verifyEnvironmentImage(await resolveEnvironment(name, { stateRoot }), { spawnProcess });
 }
 
 export async function resetEnvironment(name, { stateRoot = defaultStateRoot(), spawnProcess = spawn } = {}) {

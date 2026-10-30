@@ -19,6 +19,31 @@ Isolated Harness starts a real agent harness inside a container, with only the w
 - **Capabilities.** Skills, MCP servers and plugins are selected deliberately. Their selected versions and sources can be recorded for an evaluation or an engineering run.
 - **Authorization.** An adapter may project the minimum authorization material required for a run, then removes that projection when the run ends. Usable credentials are not written into the mounted workspace.
 
+## Daily use
+
+```sh
+# Prepare the base and toolset once.
+isolated-harness image build
+isolated-harness environment prebuild drawing-review
+
+# Reuse the prepared toolset in any project.
+isolated-harness codex --workspace /path/to/project --environment drawing-review-v1
+
+# Optional maintenance: refresh the fallback image and registered environments.
+isolated-harness image update
+```
+
+Harness programs automatically check for stable updates on startup. Inside
+the container, `codex update` and `harness-update` also work without rebuilding
+Python or browsers. Use `--no-auto-update` to skip automatic checks or
+`--harness-version <version>` for a fixed release.
+
+An **environment** supplies a fallback Codex plus a prepared **runtime** (Python,
+packages, and browsers). Runtime images and Docker build caches are shared locally;
+containers, project data and chat state have separate lifetimes. Most users
+only select `--environment`; `--runtime` is an advanced imported override.
+See the [relationship and sharing guide](docs/ENVIRONMENTS.md).
+
 ## Authorization and model access
 
 Isolated Harness is an isolation layer; it does not replace your agent account, subscription, model provider or billing relationship.
@@ -34,9 +59,9 @@ Authorization is adapter-specific. The boundary stays the same: authorization en
 | Harness | Status | Authorization model |
 | --- | --- | --- |
 | Codex CLI | Available | Existing host Codex login is projected privately for the run. |
-| Claude Code | Planned | Will preserve its supported official login or API flow inside the same isolation contract. |
+| Claude Code | Available through the generic launcher | Official login in its own isolated project home; automatic npm program upgrades. |
 | DeepSeek harness | Planned | Will support its configured official or approved-provider API flow inside the same isolation contract. |
-| Additional harnesses | Planned | Every adapter shares the mounted-workspace, memory-isolation and capability contracts. |
+| Additional npm harnesses | Register package + executable | Generic project launcher and the same automatic update protocol; provider login stays project-scoped. |
 
 ## Requirements
 

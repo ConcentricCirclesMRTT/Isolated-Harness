@@ -12,6 +12,7 @@ import { RunnerValidationError } from './errors.mjs';
 import { materializeCapabilities, resolveCapabilities } from './capabilities.mjs';
 import { readMacOsTrustBundle, resolveHostProxy } from './network.mjs';
 import { parseCodexJsonLine } from './events.mjs';
+import { createHarnessSession } from './harnesses.mjs';
 
 export function defaultStateRoot({ env = process.env, home = homedir() } = {}) {
   return env.ISOLATED_HARNESS_STATE_ROOT ?? env.AEGIS_STATE_ROOT ?? env.CHR_STATE_ROOT ?? join(home, '.isolated-harness');
@@ -20,7 +21,17 @@ const hostUser = () => typeof process.getuid === 'function' && typeof process.ge
 async function writeReceipt(path, receipt) { await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 }); }
 function waitForExit(child) { return new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', (code, signal) => resolve({ code, signal })); }); }
 
-export async function startCodexRun(rawSpec, { stateRoot = defaultStateRoot(), onEvent = () => {}, spawnProcess = spawn } = {}) {
+export async function startCodexRun(rawSpec, options = {}) {
+  const spec = validateRunSpec(rawSpec);
+  if (!spec.task) throw new RunnerValidationError('TASK_REQUIRED', 'A Codex run requires RunSpec.task.');
+  const stateRoot = options.stateRoot ?? defaultStateRoot();
+  await planMounts(spec.mounts, { runnerStateRoot: stateRoot });
+  const session = await (options.createProgramSession ?? createHarnessSession)({ image: spec.harness.image ?? 'codex-cli:local', stateRoot, offline: spec.isolation?.profile === 'offline', autoUpdate: spec.harness.autoUpdate ?? true, version: spec.harness.version ?? 'latest' });
+  try { return await executeCodexRun(spec, { ...options, stateRoot, harnessSession: session }); }
+  finally { await session.close(); }
+}
+
+async function executeCodexRun(rawSpec, { stateRoot = defaultStateRoot(), onEvent = () => {}, spawnProcess = spawn, harnessSession } = {}) {
   const spec = validateRunSpec(rawSpec);
   if (!spec.task) throw new RunnerValidationError('TASK_REQUIRED', 'A Codex run requires RunSpec.task.');
   const runId = randomUUID();
@@ -61,8 +72,8 @@ export async function startCodexRun(rawSpec, { stateRoot = defaultStateRoot(), o
   let registeredCapabilities = chatState?.registeredCapabilities;
   try { if (isNewChat || !registeredCapabilities) registeredCapabilities = await materializeCapabilities(resolvedCapabilities, { stateRoot, sessionCodexHome }); }
   catch (error) { await rm(sessionCodexHome, { recursive: true, force: true }); throw error; }
-  const plan = buildCodexContainerPlan({ image: spec.harness.image ?? 'codex-cli:local', mounts, workingDirectory: spec.workingDirectory, sessionCodexHome, profile: spec.isolation?.profile ?? 'contained', task: spec.task, user: hostUser(), trustedCa, networkEnvironment: hostProxy.environment, persistentChat: Boolean(spec.chat), resumeThreadId: chatState?.threadId });
-  const receipt = { version: 'v1', runId, state: 'starting', startedAt: new Date().toISOString(), harness: { id: spec.harness.id, image: spec.harness.image ?? 'codex-cli:local' }, chat: spec.chat ? { id: spec.chat.id, continued: Boolean(chatState?.threadId) } : null, isolation: { profile: plan.profile, user: hostUser(), network: plan.profile === 'offline' ? 'none' : 'bridge', hostProxy: hostProxy.status, trustedCa: trustedCaSource, session: spec.chat ? 'chat-scoped' : 'ephemeral' }, credential: { provider: 'host-codex', status: 'available' }, mounts, capabilities: { requested: resolvedCapabilities, registered: registeredCapabilities }, logs: { stdoutPath, stderrPath }, exit: null };
+  const plan = buildCodexContainerPlan({ image: spec.harness.image ?? 'codex-cli:local', mounts, workingDirectory: spec.workingDirectory, sessionCodexHome, profile: spec.isolation?.profile ?? 'contained', task: spec.task, user: hostUser(), trustedCa, networkEnvironment: hostProxy.environment, persistentChat: Boolean(spec.chat), resumeThreadId: chatState?.threadId, harnessSession });
+  const receipt = { version: 'v1', runId, state: 'starting', startedAt: new Date().toISOString(), harness: { id: spec.harness.id, image: spec.harness.image ?? 'codex-cli:local', version: harnessSession.program.version, release: harnessSession.program.release, updateError: harnessSession.program.updateError ?? null }, chat: spec.chat ? { id: spec.chat.id, continued: Boolean(chatState?.threadId) } : null, isolation: { profile: plan.profile, user: hostUser(), network: plan.profile === 'offline' ? 'none' : 'bridge', hostProxy: hostProxy.status, trustedCa: trustedCaSource, session: spec.chat ? 'chat-scoped' : 'ephemeral' }, credential: { provider: 'host-codex', status: 'available' }, mounts, capabilities: { requested: resolvedCapabilities, registered: registeredCapabilities }, logs: { stdoutPath, stderrPath }, exit: null };
   await writeReceipt(receiptPath, receipt);
   onEvent({ type: 'starting', runId, at: receipt.startedAt });
   let child;

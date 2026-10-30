@@ -1,5 +1,6 @@
 import { RunnerValidationError } from './errors.mjs';
 import { normalizeCapabilities } from './capabilities.mjs';
+import { codexVersionPattern } from './images.mjs';
 
 export const RUN_SPEC_VERSION = 'v1';
 export function validateRunSpec(input) {
@@ -8,6 +9,8 @@ export function validateRunSpec(input) {
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw new RunnerValidationError('RUN_SPEC_UNKNOWN_FIELD', `Unknown RunSpec field: ${key}`);
   if (input.version !== RUN_SPEC_VERSION) throw new RunnerValidationError('RUN_SPEC_VERSION', `RunSpec.version must be ${RUN_SPEC_VERSION}.`);
   if (!input.harness || typeof input.harness !== 'object' || input.harness.id !== 'codex-cli') throw new RunnerValidationError('HARNESS_UNSUPPORTED', 'Only harness.id "codex-cli" is supported in v1.');
+  if (input.harness.autoUpdate !== undefined && typeof input.harness.autoUpdate !== 'boolean') throw new RunnerValidationError('HARNESS_UPDATE_INVALID', 'harness.autoUpdate must be a boolean.');
+  if (input.harness.version !== undefined && input.harness.version !== 'latest' && !codexVersionPattern.test(input.harness.version)) throw new RunnerValidationError('HARNESS_VERSION_INVALID', 'harness.version must be latest or an exact semantic version.');
   if (typeof input.workingDirectory !== 'string' || !input.workingDirectory) throw new RunnerValidationError('WORKING_DIRECTORY_REQUIRED', 'workingDirectory is required.');
   if (!Array.isArray(input.mounts) || input.mounts.length === 0) throw new RunnerValidationError('MOUNTS_REQUIRED', 'At least one direct directory mount is required.');
   for (const mount of input.mounts) {

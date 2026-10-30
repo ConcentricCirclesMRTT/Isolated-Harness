@@ -18,7 +18,7 @@ not when a user starts a chat:
 ```sh
 git clone https://github.com/ConcentricCirclesMRTT/Isolated-Harness.git
 cd Isolated-Harness
-node bin/contained-harness.mjs image build --codex-version 0.155.0
+node bin/contained-harness.mjs image build --codex-version 0.165.0
 node bin/contained-harness.mjs environment prebuild drawing-review
 ```
 

@@ -1,0 +1,17 @@
+flowchart TD
+    C["Base image<br/>Node + fallback Codex"] --> E["Environment<br/>fallback + prepared toolset"]
+    U["Host updater<br/>check · install · verify"] --> H["Read-only program releases<br/>Codex · Claude · registered CLI"]
+    H --> A
+    H --> F
+    D["Shared runtime layers<br/>Python · packages · browsers"] --> E
+    B["Build-only download cache<br/>pip wheels · browser revisions"] -.-> D
+    E --> A["Session A<br/>Project A + private chat state"]
+    E --> F["Session B<br/>Project B + private chat state"]
+    A --> P["/workspace/runtime<br/>temporary links to image dependencies"]
+    F --> Q["/workspace/runtime<br/>temporary links to image dependencies"]
+    M["Optional managed runtime<br/>explicit read-only override"] -.-> P
+    classDef shared fill:#e5f4ed,stroke:#387459,color:#173e2c
+    classDef session fill:#edf2ff,stroke:#6676ae,color:#273353
+    class C,D,E,B,U,H shared
+    class A,F,P,Q session
+    linkStyle default stroke:#64748b,color:#64748b

@@ -1,22 +1,23 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { validateRunSpec } from '../src/spec.mjs';
 import { planMounts } from '../src/mounts.mjs';
 import { inspectHostCodexLogin } from '../src/credentials/hostCodex.mjs';
 import { buildCodexContainerPlan } from '../src/adapters/codex.mjs';
 import { defaultStateRoot, startCodexRun } from '../src/run.mjs';
 import { resolveCapabilities } from '../src/capabilities.mjs';
-import { buildEnvironment, listEnvironmentPresets, listEnvironments, loadEnvironmentSpec, presetEnvironmentSpec, resetEnvironment, resolveEnvironment, verifyEnvironment } from '../src/environments.mjs';
+import { buildEnvironment, listEnvironmentPresets, listEnvironments, presetEnvironmentSpec, resetEnvironment, verifyEnvironment } from '../src/environments.mjs';
 import { importRuntime, listRuntimes } from '../src/runtimes.mjs';
+import { buildImage, codexVersionPattern } from '../src/images.mjs';
+import { listHarnesses, prepareHarness, registerHarness } from '../src/harnesses.mjs';
+import { runHarness } from '../src/generic-harness.mjs';
 
 const [command, subcommand, ...arguments_] = process.argv.slice(2);
-const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const usage = `Usage:
   harness-runner <preflight|plan|run> <run-spec.json>
-  harness-runner image build [tag] [--codex-version <version>]
+  harness-runner image <build|update> [tag] [--codex-version <version|latest>]
   harness-runner environment build --spec <environment.json>
   harness-runner environment build --preset <name> [--runtime-source <directory>]
   harness-runner environment presets
@@ -26,27 +27,23 @@ const usage = `Usage:
   harness-runner environment reset <name>
   harness-runner runtime import --name <name> --source <directory> [--with-cache]
   harness-runner runtime list
+  harness-runner harness list
+  harness-runner harness update <id> [--version <version>] [--image <image>]
+  harness-runner harness register --id <id> --package <npm-package> --command <executable>
+  harness-runner harness run <id> --workspace <directory> [--environment <name>] [--offline] [--no-auto-update] [--harness-version <version>] [-- <args...>]
   harness-runner chat send <chat-id> <workspace-directory> <message...>
   harness-runner chat inspect <chat-id>`;
 const emit = event => process.stdout.write(`${JSON.stringify(event)}\n`);
-const codexVersion = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$/;
 function imageBuildOptions(args) {
   let image = 'codex-cli:local';
   let version;
   for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === '--codex-version') version = args[++index];
+    if (args[index] === '--codex-version' && args[index + 1]) version = args[++index];
     else if (!args[index].startsWith('-') && image === 'codex-cli:local') image = args[index];
     else throw new Error(usage);
   }
-  if (version && !codexVersion.test(version)) throw new Error('CODEX_VERSION_INVALID: use a semantic Codex CLI version such as 0.155.0.');
+  if (version !== undefined && version !== 'latest' && !codexVersionPattern.test(version)) throw new Error('CODEX_VERSION_INVALID: use latest or an exact semantic Codex CLI version.');
   return { image, version };
-}
-async function buildImage({ image = 'codex-cli:local', version } = {}) {
-  const arguments_ = ['build', '--tag', image];
-  if (version) arguments_.push('--build-arg', `CODEX_VERSION=${version}`);
-  arguments_.push('.');
-  await new Promise((resolve, reject) => { const child = spawn('docker', arguments_, { cwd: packageRoot, stdio: 'inherit' }); child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Docker image build exited ${code}`))); });
-  emit({ type: 'image_built', image, codexVersion: version ?? 'Dockerfile default' });
 }
 function chatSpec(chatId, workspace, task) {
   return validateRunSpec({
@@ -81,20 +78,63 @@ function runtimeImportOptions(args) {
   if (!options.name || !options.source) throw new Error(usage);
   return options;
 }
+function harnessOptions(args) {
+  const options = { args: [] };
+  if (args[0] && !args[0].startsWith('-')) options.id = args[0];
+  for (let index = options.id ? 1 : 0; index < args.length; index++) {
+    const value = args[index];
+    if (value === '--') { options.args = args.slice(index + 1); break; }
+    if (value === '--offline') options.offline = true;
+    else if (value === '--no-auto-update') options.autoUpdate = false;
+    else {
+      const fields = { '--id': 'id', '--workspace': 'workspace', '--environment': 'environmentName', '--image': 'image', '--version': 'version', '--harness-version': 'version', '--package': 'package', '--command': 'command' };
+      if (!fields[value] || !args[index + 1] || args[index + 1].startsWith('--')) throw new Error(usage);
+      options[fields[value]] = args[++index];
+    }
+  }
+  if (!options.id) throw new Error(usage);
+  return options;
+}
 try {
-  if (command === 'image' && subcommand === 'build') await buildImage(imageBuildOptions(arguments_));
+  if (command === 'harness' && subcommand === 'list') emit({ type: 'harnesses', harnesses: await listHarnesses() });
+  else if (command === 'harness' && subcommand === 'register') emit({ type: 'harness_registered', ...(await registerHarness(harnessOptions(arguments_))) });
+  else if (command === 'harness' && subcommand === 'update') {
+    const program = await prepareHarness({ ...harnessOptions(arguments_), force: true });
+    emit({ type: 'harness_updated', id: program.id, version: program.version, release: program.release });
+  }
+  else if (command === 'harness' && subcommand === 'run') {
+    const options = harnessOptions(arguments_);
+    if (!options.workspace) throw new Error(usage);
+    const result = await runHarness(options);
+    process.exitCode = result.exit.code ?? 1;
+  }
+  else if (command === 'image' && ['build', 'update'].includes(subcommand)) {
+    const options = imageBuildOptions(arguments_);
+    const base = await buildImage(options);
+    emit({ type: 'image_built', ...base });
+    if (subcommand === 'update') {
+      for (const environment of await listEnvironments()) {
+        if (environment.spec?.baseImage !== base.image) continue;
+        const { source: _source, trustedCaFile: ca, ...spec } = environment.spec;
+        if (environment.trust === 'explicit-file') throw new Error(`Environment ${environment.name} uses an explicit CA. Rebuild it with its original --spec file.`);
+        // Legacy records store only a CA basename, not a usable host path.
+        const directory = await mkdtemp(join(tmpdir(), 'isolated-harness-update-'));
+        try {
+          const path = join(directory, 'environment.json');
+          await writeFile(path, JSON.stringify(spec), { mode: 0o600 });
+          emit({ type: 'environment_built', ...(await buildEnvironment(path)) });
+        } finally { await rm(directory, { recursive: true, force: true }); }
+      }
+    }
+  }
   else if (command === 'environment' && subcommand === 'build') { const options = await environmentBuildOptions(arguments_); emit({ type: 'environment_built', ...(await buildEnvironment(options.spec, { runtimeSource: options.runtimeSource })) }); }
   else if (command === 'environment' && subcommand === 'presets') emit({ type: 'environment_presets', presets: await listEnvironmentPresets() });
   else if (command === 'environment' && subcommand === 'prebuild') {
     const presets = arguments_.length ? arguments_ : await listEnvironmentPresets();
     emit({ type: 'environment_prebuild_started', presets });
-    const runtimes = await listRuntimes();
     for (const preset of presets) {
       const specPath = await presetEnvironmentSpec(preset);
-      const spec = await loadEnvironmentSpec(specPath);
-      const previous = await resolveEnvironment(spec.name).catch(() => null);
-      const runtimeSource = previous?.spec?.bundledRuntimeDigest ? runtimes.find(runtime => runtime.digest === previous.spec.bundledRuntimeDigest)?.path : undefined;
-      emit({ type: 'environment_built', ...(await buildEnvironment(specPath, { runtimeSource })) });
+      emit({ type: 'environment_built', ...(await buildEnvironment(specPath)) });
     }
   }
   else if (command === 'environment' && subcommand === 'list') emit({ type: 'environments', environments: await listEnvironments() });
@@ -137,7 +177,7 @@ try {
       else {
         if (login.status !== 'available') throw new Error('HOST_LOGIN_UNAVAILABLE: log in to Codex on the host before generating a runnable plan.');
         const plan = buildCodexContainerPlan({ image: spec.harness.image ?? 'codex-cli:local', mounts, workingDirectory: spec.workingDirectory, sessionCodexHome: '<runner-managed-session-home>', profile: spec.isolation?.profile ?? 'contained', task: spec.task });
-        emit({ ...plan, credential: { provider: 'host-codex', status: 'available' }, capabilities });
+        emit({ ...plan, harnessProgram: { autoUpdate: spec.harness.autoUpdate ?? true, version: spec.harness.version ?? 'latest' }, credential: { provider: 'host-codex', status: 'available' }, capabilities });
       }
     }
   } else { throw new Error(usage); }

@@ -4,13 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { startInteractiveCodex } from '../src/interactive.mjs';
 
 const usage = `Usage:
-  isolated-harness codex --workspace <directory> [--skills inherited|none|<skill-dir>]... [--config <config.toml>] [--session <id>] [--environment <name>] [--runtime <name>] [--runtime-write] [--offline] [--image <image>] [-- <codex CLI args...>]
-  isolated-harness image build [tag]
-  isolated-harness environment <build|list|reset> ...
+  isolated-harness codex --workspace <directory> [--skills inherited|none|<skill-dir>]... [--config <config.toml>] [--session <id>] [--environment <name>] [--runtime <name>] [--runtime-write] [--offline] [--no-auto-update] [--harness-version <version>] [--image <image>] [-- <codex CLI args...>]
+  isolated-harness image <build|update> [tag] [--codex-version <version|latest>]
+  isolated-harness environment <build|prebuild|presets|list|verify|reset> ...
   isolated-harness runtime <import|list> ...
 
 Everything after -- is forwarded unchanged to the real Codex CLI in the container.`;
-const runnerCommands = new Set(['image', 'environment', 'runtime', 'preflight', 'plan', 'run', 'chat']);
+const runnerCommands = new Set(['image', 'environment', 'runtime', 'harness', 'preflight', 'plan', 'run', 'chat']);
 
 function parse(argv) {
   if (argv[0] !== 'codex') throw new Error(usage);
@@ -27,6 +27,8 @@ function parse(argv) {
     else if (value === '--runtime-write') options.runtimeWritable = true;
     else if (value === '--image') options.image = argv[++index];
     else if (value === '--offline') options.profile = 'offline';
+    else if (value === '--no-auto-update') options.autoUpdate = false;
+    else if (value === '--harness-version' && argv[index + 1]) options.harnessVersion = argv[++index];
     else throw new Error(`Unknown isolated-harness option: ${value}\n\n${usage}`);
   }
   if (!options.workspace) throw new Error(usage);

@@ -20,3 +20,19 @@ test('imports a workspace runtime as a managed read-only-compatible artifact wit
   const resolved = await resolveRuntime('drawing-runtime', { stateRoot: join(root, 'state') });
   assert.equal(resolved.containerPath, '/workspace/runtime');
 });
+
+test('runtime identity detects same-size edits and never replaces an existing shared artifact', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'isolated-harness-runtime-content-'));
+  const source = join(root, 'source');
+  await Promise.all(['browsers', 'python', 'venv'].map(path => mkdir(join(source, path), { recursive: true })));
+  const file = join(source, 'python/binary');
+  await writeFile(file, 'first');
+  const options = { name: 'version-one', source, stateRoot: join(root, 'state') };
+  const first = await importRuntime(options);
+  assert.equal((await importRuntime(options)).reused, true);
+  await writeFile(file, 'other');
+  await assert.rejects(importRuntime(options), { code: 'RUNTIME_ALREADY_EXISTS' });
+  const second = await importRuntime({ ...options, name: 'version-two' });
+  assert.notEqual(first.digest, second.digest);
+  assert.equal((await resolveRuntime(options.name, options)).digest, first.digest);
+});

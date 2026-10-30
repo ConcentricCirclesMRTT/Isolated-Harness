@@ -1,4 +1,5 @@
-import { cp, mkdir, readdir, rename, rm, stat, writeFile, readFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readlink, rename, rm, stat, writeFile, readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { RunnerValidationError } from './errors.mjs';
@@ -29,8 +30,12 @@ async function digestDirectory(path) {
       const child = join(current, entry.name);
       const next = join(relative, entry.name);
       if (entry.isDirectory()) { hash.update(`directory\0${next}\0`); await visit(child, next); }
-      else if (entry.isSymbolicLink()) { hash.update(`symlink\0${next}\0`); }
-      else if (entry.isFile()) { const metadata = await stat(child); hash.update(`file\0${next}\0${metadata.size}\0`); }
+      else if (entry.isSymbolicLink()) { hash.update(`symlink\0${next}\0${await readlink(child)}\0`); }
+      else if (entry.isFile()) {
+        const metadata = await stat(child);
+        hash.update(`file\0${next}\0${metadata.size}\0${metadata.mode & 0o777}\0`);
+        for await (const chunk of createReadStream(child)) hash.update(chunk);
+      }
     }
   }
   await visit(path);
@@ -58,9 +63,16 @@ export async function importRuntime({ name, source, includeCache = false, stateR
       await cp(join(sourcePath, entry), join(staging, entry), { recursive: true, dereference: false });
       copied.push(entry);
     }
-    const manifest = { version: 'v1', name, containerPath: '/workspace/runtime', digest: await digestDirectory(staging), entries: copied, cacheIncluded: includeCache, importedAt: new Date().toISOString() };
+    const manifest = { version: 'v1', name, containerPath: '/workspace/runtime', digest: await digestDirectory(staging), digestAlgorithm: 'sha256-content-v2', entries: copied, cacheIncluded: includeCache, importedAt: new Date().toISOString() };
     await writeFile(join(staging, 'runtime.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-    await rm(target, { recursive: true, force: true });
+    const existing = await resolveRuntime(name, { stateRoot }).catch(error => { if (error.code === 'RUNTIME_NOT_FOUND') return null; throw error; });
+    if (existing) {
+      if (existing.digest === manifest.digest && existing.cacheIncluded === includeCache) {
+        await rm(staging, { recursive: true, force: true });
+        return { ...existing, reused: true };
+      }
+      reject('RUNTIME_ALREADY_EXISTS', `Runtime "${name}" already exists with different content. Import under a new name so existing sessions keep their runtime.`);
+    }
     await rename(staging, target);
     return { ...manifest, path: target };
   } catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }

@@ -16,7 +16,7 @@ test('persists redacted receipt and removes the run-scoped Codex home after exit
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
       setTimeout(() => { child.stdout.end('runner output\n'); child.emit('exit', 0, null); }, 10); return child;
     };
-    const result = await startCodexRun({ version: 'v1', harness: { id: 'codex-cli', image: 'fixture' }, workingDirectory: '/workspace', mounts: [{ hostPath: workspace, containerPath: '/workspace', mode: 'rw' }], task: 'fixture task', isolation: { profile: 'contained' } }, { stateRoot: join(root, 'state'), spawnProcess: fakeSpawn });
+    const result = await startCodexRun({ version: 'v1', harness: { id: 'codex-cli', image: 'fixture' }, workingDirectory: '/workspace', mounts: [{ hostPath: workspace, containerPath: '/workspace', mode: 'rw' }], task: 'fixture task', isolation: { profile: 'contained' } }, { stateRoot: join(root, 'state'), spawnProcess: fakeSpawn, createProgramSession: async () => ({ command: ['codex'], dockerArgs: [], program: {version: 'fixture', release: 'fixture'}, close: async () => {} }) });
     assert.equal(result.state, 'completed');
     const receipt = JSON.parse(await readFile(result.receiptPath, 'utf8'));
     assert.equal(receipt.credential.provider, 'host-codex'); assert.equal(receipt.credential.status, 'available');

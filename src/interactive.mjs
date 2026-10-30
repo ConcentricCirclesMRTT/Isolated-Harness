@@ -1,4 +1,4 @@
-import { copyFile, cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,7 @@ import { readMacOsTrustBundle, resolveHostProxy } from './network.mjs';
 import { defaultStateRoot } from './run.mjs';
 import { resolveEnvironment } from './environments.mjs';
 import { resolveRuntime } from './runtimes.mjs';
+import { createHarnessSession } from './harnesses.mjs';
 
 const skillName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const hostCodexHome = ({ env = process.env, home = homedir() } = {}) => resolve(env.CODEX_HOME ?? join(home, '.codex'));
@@ -100,6 +101,7 @@ export function renderRuntimeAgentGuide({ environment, runtime, runtimeWritable,
     runtime ? `- Prepared entries: ${runtime.entries.join(', ')}` : workspaceRuntime ? '- Prepared entries come from the environment image.' : '- No prepared runtime was selected for this session.',
     '',
     'Runtime policy:',
+    '- Harness program upgrades are enabled independently of runtime dependencies. Use `codex update`, `harness-update`, or the official npm global update command; the session broker installs and verifies a new program release without rebuilding this environment. Offline or pinned-version sessions cannot download updates.',
     runtimeMode === 'none' ? '- Do not assume that Python, Playwright, browsers, or image/PDF packages are preinstalled. Report missing dependencies before downloading them.' : '- Prefer the prepared runtime for Python, virtualenv, Playwright, browsers, and image/PDF dependencies.',
     runtimeMode === 'managed-readonly' ? '- The managed runtime is read-only. Do not modify it, reinstall into it, or replace it. Use a project-local temporary directory only when explicitly requested.' : runtimeMode === 'managed-writable' ? '- This managed runtime is shared and writable only because the user explicitly enabled it. Reuse existing packages, avoid destructive changes, and do not run concurrent sessions against it.' : '- Do not recreate the environment unless the user explicitly requests it.',
     '- The host workspace is directly mounted at `/workspace`; files created there are real project files and must be treated as user data.',
@@ -127,7 +129,7 @@ async function acquireWritableRuntime(runtime, sessionId) {
   return () => rm(lockPath, { recursive: true, force: true });
 }
 
-export async function startInteractiveCodex({ workspace, skills = [], configPath, sessionId, profile = 'contained', image = 'codex-cli:local', environmentName, runtimeName, runtimeWritable = false, codexArgs = [], stateRoot = defaultStateRoot(), tty = Boolean(process.stdin.isTTY && process.stdout.isTTY), spawnProcess = spawn } = {}) {
+export async function startInteractiveCodex({ workspace, skills = [], configPath, sessionId, profile = 'contained', image = 'codex-cli:local', environmentName, runtimeName, runtimeWritable = false, codexArgs = [], autoUpdate = true, harnessVersion = 'latest', stateRoot = defaultStateRoot(), tty = Boolean(process.stdin.isTTY && process.stdout.isTTY), spawnProcess = spawn } = {}) {
   if (!workspace) throw new RunnerValidationError('INTERACTIVE_WORKSPACE_REQUIRED', '--workspace is required.');
   if (sessionId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(sessionId)) throw new RunnerValidationError('INTERACTIVE_SESSION_INVALID', '--session must be a safe non-empty identifier.');
   if (environmentName && image !== 'codex-cli:local') throw new RunnerValidationError('INTERACTIVE_ENVIRONMENT_IMAGE_CONFLICT', 'Use either --environment or --image, not both.');
@@ -144,6 +146,8 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
   const projectionRoot = join(stateRoot, 'credential-projections', randomUUID());
   const privateAuthHome = join(projectionRoot, 'codex-home');
   let releaseRuntimeLock;
+  let createdRuntimeMountpoint = false;
+  let harnessSession;
   await mkdir(workspaceCodexHome, { recursive: true, mode: 0o700 });
   // Docker overlays the temporary private auth file here. The empty placeholder
   // means the project never receives a usable host login after the container exits.
@@ -170,11 +174,17 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
     }
     releaseRuntimeLock = runtimeWritable ? await acquireWritableRuntime(runtime, sessionId) : null;
     const selectedImage = environment?.image ?? image;
+    harnessSession = await createHarnessSession({ image: selectedImage, stateRoot, offline: profile === 'offline', autoUpdate, version: harnessVersion });
     const workspaceRuntime = Boolean(environment?.spec?.workspaceRuntime);
+    if (runtime && !workspaceRuntime) throw new RunnerValidationError('RUNTIME_ENVIRONMENT_REQUIRED', 'A managed runtime requires an environment with workspaceRuntime enabled. Use --environment drawing-review-v1, or omit --runtime to use an environment’s prepared dependencies.');
+    if (workspaceRuntime || runtime) {
+      try { await mkdir(join(hostWorkspace, 'runtime')); createdRuntimeMountpoint = true; }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+    }
     const agentInstructionsPath = join(projectionRoot, 'AGENTS.md');
     await writeRuntimeAgentGuide({ workspace: hostWorkspace, destination: agentInstructionsPath, environment, runtime, runtimeWritable, workspaceRuntime });
-    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), agentInstructionsPath, profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, workspaceRuntime, runtimePath: runtime?.path, runtimeWritable, codexArgs, tty });
-    const metadata = { version: 'v1', sessionId: sessionId ?? null, workspace: mounts[0], codexHome: workspaceCodexHome, skills: registeredSkills, config: registeredConfig ?? null, environment: environment ? { name: environment.name, image: environment.image, digest: environment.digest, workspaceRuntime } : null, runtime: runtime ? { name: runtime.name, digest: runtime.digest, entries: runtime.entries, cacheIncluded: runtime.cacheIncluded } : null, profile, image: selectedImage, codexArgs, startedAt: new Date().toISOString() };
+    const plan = buildCodexInteractivePlan({ image: selectedImage, mounts, workingDirectory: '/workspace', codexHomePath: containerCodexHome, authProjectionPath: join(privateAuthHome, 'auth.json'), agentInstructionsPath, profile, user: userIdentity(), networkEnvironment: hostProxy.environment, trustedCa, workspaceRuntime, runtimePath: runtime?.path, runtimeWritable, codexArgs, tty, harnessSession });
+    const metadata = { version: 'v1', sessionId: sessionId ?? null, workspace: mounts[0], codexHome: workspaceCodexHome, skills: registeredSkills, config: registeredConfig ?? null, environment: environment ? { name: environment.name, image: environment.image, digest: environment.digest, workspaceRuntime } : null, runtime: runtime ? { name: runtime.name, digest: runtime.digest, entries: runtime.entries, cacheIncluded: runtime.cacheIncluded } : null, harnessProgram: { id: 'codex-cli', version: harnessSession.program.version, release: harnessSession.program.release, autoUpdate, updateError: harnessSession.program.updateError ?? null }, profile, image: selectedImage, codexArgs, startedAt: new Date().toISOString() };
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
     const child = spawnProcess('docker', plan.dockerArgs, { stdio: 'inherit' });
     const exit = await waitForExit(child);
@@ -182,7 +192,11 @@ export async function startInteractiveCodex({ workspace, skills = [], configPath
     await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
     return { ...metadata, state: exit.code === 0 ? 'completed' : 'failed', sessionPath: workspaceCodexHome };
   } finally {
+    if (harnessSession) await harnessSession.close();
     if (releaseRuntimeLock) await releaseRuntimeLock();
+    // Docker needs an empty directory under the bind mount for its tmpfs.
+    // Remove only a mountpoint we created, and only if it is still empty.
+    if (createdRuntimeMountpoint) await rmdir(join(hostWorkspace, 'runtime')).catch(() => {});
     await rm(projectionRoot, { recursive: true, force: true });
   }
 }

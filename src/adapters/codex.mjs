@@ -1,6 +1,6 @@
 import { RunnerValidationError } from '../errors.mjs';
 
-export function buildCodexContainerPlan({ image, mounts, workingDirectory, sessionCodexHome, profile = 'contained', task, user = '1000:1000', networkEnvironment = {}, trustedCa = false, resumeThreadId, persistentChat = false }) {
+export function buildCodexContainerPlan({ image, mounts, workingDirectory, sessionCodexHome, profile = 'contained', task, user = '1000:1000', networkEnvironment = {}, trustedCa = false, resumeThreadId, persistentChat = false, harnessSession }) {
   const workspace = mounts.find(mount => mount.containerPath === workingDirectory && mount.mode === 'rw');
   if (!workspace) throw new RunnerValidationError('WORKING_DIRECTORY_NOT_WRITABLE', 'workingDirectory must be the destination of a declared rw mount.');
   if (profile !== 'contained' && profile !== 'offline') throw new RunnerValidationError('ISOLATION_PROFILE_INVALID', `Unsupported profile: ${profile}`);
@@ -15,7 +15,8 @@ export function buildCodexContainerPlan({ image, mounts, workingDirectory, sessi
   // The session home contains only a runner-written auth projection and the
   // explicitly selected capability config. We deliberately load that config
   // while never mounting the host's CODEX_HOME.
-  dockerArgs.push(image, 'codex', 'exec');
+  if (harnessSession) dockerArgs.push(...harnessSession.dockerArgs);
+  dockerArgs.push(image, ...(harnessSession?.command ?? ['codex']), 'exec');
   if (resumeThreadId) dockerArgs.push('resume');
   if (!persistentChat) dockerArgs.push('--ephemeral');
   dockerArgs.push('--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox');
@@ -29,7 +30,7 @@ export function buildCodexContainerPlan({ image, mounts, workingDirectory, sessi
 // real Codex terminal UI; arguments after the contained-harness `--` separator
 // are forwarded untouched so new Codex CLI functionality does not require the
 // runner to reimplement it.
-export function buildCodexInteractivePlan({ image, mounts, workingDirectory, codexHomePath, authProjectionPath, agentInstructionsPath, profile = 'contained', user = '1000:1000', networkEnvironment = {}, trustedCa = false, workspaceRuntime = false, runtimePath, runtimeWritable = false, codexArgs = [], tty = true }) {
+export function buildCodexInteractivePlan({ image, mounts, workingDirectory, codexHomePath, authProjectionPath, agentInstructionsPath, profile = 'contained', user = '1000:1000', networkEnvironment = {}, trustedCa = false, workspaceRuntime = false, runtimePath, runtimeWritable = false, codexArgs = [], tty = true, harnessSession }) {
   const workspace = mounts.find(mount => mount.containerPath === workingDirectory && mount.mode === 'rw');
   if (!workspace) throw new RunnerValidationError('WORKING_DIRECTORY_NOT_WRITABLE', 'workingDirectory must be the destination of a declared rw mount.');
   if (profile !== 'contained' && profile !== 'offline') throw new RunnerValidationError('ISOLATION_PROFILE_INVALID', `Unsupported profile: ${profile}`);
@@ -54,6 +55,7 @@ export function buildCodexInteractivePlan({ image, mounts, workingDirectory, cod
   // The container is already restricted to the declared workspace mount. Give
   // Codex full access inside that container by default, so normal file edits
   // do not stop for approval prompts while the host remains isolated.
-  dockerArgs.push(image, 'codex', '--cd', workingDirectory, '--dangerously-bypass-approvals-and-sandbox', ...codexArgs);
+  if (harnessSession) dockerArgs.push(...harnessSession.dockerArgs);
+  dockerArgs.push(image, ...(harnessSession?.command ?? ['codex']), '--cd', workingDirectory, '--dangerously-bypass-approvals-and-sandbox', ...codexArgs);
   return { runtime: 'docker', dockerArgs, environment: { CODEX_HOME: codexHomePath, HOME: codexHomePath, proxy: profile === 'offline' ? 'disabled' : Object.keys(networkEnvironment).length ? 'host-configured' : 'not-configured', workspaceRuntime: runtimePath ? (runtimeWritable ? 'managed-writable' : 'managed-readonly') : workspaceRuntime ? 'prebuilt' : 'not-mounted' }, mountCount: mounts.length + 1 + (agentInstructionsPath ? 1 : 0), profile };
 }

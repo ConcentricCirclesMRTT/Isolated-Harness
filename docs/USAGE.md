@@ -11,7 +11,9 @@ assistant answer or command.
 `isolated-harness codex` opens the actual Codex terminal interface inside the
 container. It does not replace Codex with a limited chat UI: model selection,
 approval flow, slash commands, `mcp`, `plugin`, `review`, `resume`, and every
-other CLI command in the pinned image remain Codex CLI functionality.
+other CLI commands remain Codex CLI functionality. Program updates use the
+shared upgrade layer independently of the image; use `--harness-version` to
+pin a release. See [automatic upgrades](QUICKSTART.md#automatic-harness-upgrades).
 
 ```sh
 # Install the local binary name once from this repository.

@@ -1,21 +1,171 @@
-# Custom environments
+# Environments and shared runtimes
 
-An environment is a versioned, local Docker image for one class of agent work.
-It keeps system packages and Python dependencies outside the mounted workspace.
-The base Codex image remains immutable; a selected environment adds declared
-dependencies in a Docker build layer.
+Use **one environment per toolset**, then reuse it across projects and chats.
+For drawing work the normal launch needs only:
 
-`pythonVersion: "3.12"` copies the official Python 3.12 runtime into the
-environment image while retaining the Codex base image. `packageMirror:
-"tuna"` configures the Tsinghua Debian mirror for ordinary Debian packages and
-the Tsinghua PyPI mirror for pip; Debian security updates remain on the
-official security repository.
+```sh
+isolated-harness codex --workspace /path/to/project --environment drawing-review-v1
+```
+
+No separate runtime import or per-project dependency installation is required.
+
+## The relationship
+
+| Concept | Owns | Lifetime and sharing |
+| --- | --- | --- |
+| Base Codex image | Node and a fallback Codex CLI version | Local Docker image; initialized once and updated deliberately |
+| Harness program release | The currently selected Codex/other CLI executable | Shared per harness/OS/CPU; automatically updated independently of the image |
+| Runtime dependencies | Python, packages, system libraries and browser binaries | Immutable Docker layers shared on this machine |
+| Environment | A named selection of Codex plus runtime dependencies | Built once, reusable by many projects and sessions |
+| Container / session | The running process, temporary files, chat state | New container per launch; chat state stays scoped to its project/session |
+| Managed runtime (`--runtime`) | A deliberately imported Linux Python/browser artifact | Optional advanced override, shared read-only by default |
+
+![Environment and runtime ownership](diagrams/environment-runtime.png)
+
+The default environment build prepares dependency layers from
+`node:22-bookworm-slim` independently of Codex, then copies Codex from the
+selected base image **after** dependency installation. Updating Codex therefore
+keeps the prepared Python and browser layers. A custom `baseImage` retains its
+own filesystem and is rebuilt when that base changes; it does not use the
+Codex-specific copying optimization.
+
+`/workspace/runtime` is an **access path**, not another runtime download.
+It is a tiny, disposable tmpfs containing links into the image:
+
+- `venv` and `python` point to `/opt/isolated-harness/python`.
+- `browsers` links to the binaries in `/opt/ms-playwright`.
+- Playwright's writable `.links` registry belongs to the current container.
+
+Every preset exposes this path. Docker may need an empty host `runtime/`
+mountpoint while a session runs; the harness removes it on exit if it created
+it and it is still empty. Existing project directories are preserved. No
+dependency files are copied into that host directory. The generated session `AGENTS.md` describes the available dependencies
+and tells the agent to reuse them. All presets' Python environments are also on
+`PATH`.
+
+## Prepare once
+
+```sh
+isolated-harness image build
+isolated-harness environment prebuild drawing-review
+isolated-harness environment verify drawing-review-v1
+isolated-harness codex --workspace /path/to/project --environment drawing-review-v1
+```
+
+| Preset | Includes |
+| --- | --- |
+| `python-analysis` | Python, jsonschema, NumPy and SymPy |
+| `document-review` | Python, Poppler, NSS, Pillow and PyMuPDF |
+| `browser-review` | Python Playwright and Chromium |
+| `drawing-review` | Document tools, numerical libraries, Playwright and Chromium |
+
+`environment prebuild` with no names prepares all four. `environment list`
+shows the selected image, actual base image ID, Codex version, platform,
+dependency identity and whether the build reused a runtime.
+
+## Automatic program upgrades
+
+Normal sessions automatically check for stable harness releases on startup,
+with a shared one-hour check cache. Long-running online sessions also
+recheck hourly; existing processes keep running their original release. A program update installs only the selected
+CLI and verifies it before switching the shared version. It does not rebuild
+the environment or download its runtime. `codex update`, `harness-update`, and
+registered npm global update commands work inside the container through a
+private session request channel; the host performs the bounded installation.
+The Docker socket, host history, and a writable shared program directory are
+not exposed to sessions.
+
+Verified releases live under
+`~/.isolated-harness/harness-programs/<id>/<os>-<cpu>/releases/`. Public package
+downloads have a separate cache. A short-lived installer container can write
+only the staging release and download cache. Installations are serialized per
+harness/platform, and previous releases remain available to running processes.
+Pinned sessions select a fixed release without modifying the shared current
+version. Offline sessions do not check or download updates. Registry or
+installation failure during an automatic check falls back to the current
+verified version; an explicitly requested failed update reports an error.
+
+A session records the program version separately from the environment image's
+baked-in Codex version. Read `harnessProgram` in interactive session metadata
+or `harness.version` in batch receipts for the program selected at launch.
+See [Quick Start](QUICKSTART.md#automatic-harness-upgrades) for commands and
+other npm-distributed harnesses.
+
+## Maintain the fallback base image
+
+```sh
+isolated-harness image update
+```
+
+This resolves the official npm `latest` tag to an exact version, builds and
+checks the base image, then rebuilds **every registered environment using that
+base**. New sessions use the updated environments. Running containers continue
+with their original image. Unused presets are not downloaded automatically.
+
+For a controlled upgrade or rollback:
+
+```sh
+isolated-harness image update --codex-version 0.165.0
+```
+
+`image build` updates only the base; `image update` also updates its registered
+environments. Both accept an optional image tag. A bare `docker build` uses the
+version pinned in the packaged Dockerfile; the harness commands resolve latest
+unless an exact version is supplied. A literal `@latest` inside a cached Docker
+installation step would not reliably update, which is why resolution happens
+before the build.
+
+Each environment records the actual base image ID. Changing `codex-cli:local`
+therefore changes the environment's identity even though the tag stays the
+same. Dependency identity excludes the environment name and Codex version.
+Identical toolsets can reuse an existing local environment's dependency layers,
+including legacy images. Dependency snapshots are recorded separately, so
+repeated Codex updates do not stack another entire Codex installation in the
+shared runtime. Legacy browser layouts are reconciled once with the
+installed Playwright package; only missing browser revisions need downloading.
+
+The new image must pass an offline probe before its environment record is
+atomically replaced. The probe imports all declared Python modules, actually
+launches and closes each declared browser, and checks the recorded Codex
+version. A failed build or probe leaves the previous environment selected.
+
+Environments built with an explicit CA file should be rebuilt from their
+original `--spec` file; saved records intentionally retain only its basename.
+
+## Exactly what is shared
+
+| Operation | Reuse | Downloads |
+| --- | --- | --- |
+| Open another project/chat with the same environment | Existing local image, immutable dependencies and a shared harness program | None for the prepared runtime; a due program check may fetch a newer CLI |
+| Run `prebuild` again with unchanged inputs | Existing verified image | None |
+| Update the running harness program | Existing dependency layers; publish a new verified program release | New CLI package, if absent; no environment rebuild |
+| Update the fallback base image | Existing dependency snapshots; replace the baked-in Codex payload | New Codex package, if absent |
+| Build another environment with identical dependencies | Existing local runtime layers, independent of its name | None for those dependencies |
+| Change the dependency set | Docker's matching layers plus pip/browser build caches | Missing packages and browser revisions; package index metadata may be fetched |
+| Use a different machine or CPU platform | A separate compatible image is needed | First build/download on that machine |
+
+BuildKit download caches live in Docker's builder storage. pip wheels and
+Playwright browser revisions are reused across builds on the same OS and CPU
+architecture; browser garbage
+collection is disabled for this shared build cache. Cache mounts use
+`sharing=locked` so simultaneous builds do not modify the same cache at once.
+The browser cache may retain several revisions, and images copied from it may
+include more than the current revision. These caches are for building images;
+agent sessions never receive a shared writable package cache.
+
+Sharing has limits: Linux/macOS binaries, CPU architectures, Python versions,
+and Playwright/browser revisions must match. Different dependency sets do not
+share a writable virtualenv. Changing a proxy CA updates the local trust layer
+without reinstalling the toolset. Docker images do not share host credentials,
+chat history or project files. Model requests and project-specific dependencies
+can still require network access.
+
+Unpinned dependencies are snapshots of a successful build, not automatically
+refreshed on each launch. To deliberately upgrade tooling, change/pin package
+versions in a spec and build it. Removing Docker's images/build cache causes a
+later build to fetch missing data again.
 
 ## Environment specification
-
-Environment specifications use JSON so the package requires no YAML parser.
-Only safe Debian package names and pinned-or-unpinned Python package names are
-accepted; arbitrary shell commands, URLs, and Dockerfile fragments are not.
 
 ```json
 {
@@ -30,195 +180,70 @@ accepted; arbitrary shell commands, URLs, and Dockerfile fragments are not.
 }
 ```
 
-`examples/drawing-review.environment.json` is a working starting point. The
-resulting image contains Debian dependencies and an isolated Python virtual
-environment at `/opt/isolated-harness/python`; its `python` and `pip` are added
-to `PATH` for the agent.
+```sh
+isolated-harness environment build --spec examples/drawing-review.environment.json
+```
 
-`playwright` accepts `chromium`, `firefox`, and `webkit`. It installs the
-selected browser binaries and their Linux runtime dependencies into the image
-at build time. Selecting a browser also adds the Python `playwright` package.
+Python/Playwright environments default to `workspaceRuntime: true`.
+`pythonVersion: "3.12"` selects the official Python runtime. `packageMirror:
+"tuna"` selects the Tsinghua Debian and PyPI mirrors; Debian security updates
+stay on the official security repository. Browser selection adds the Python
+Playwright package automatically. Pin package versions for controlled upgrades.
+Safe package names and optional exact Python versions are accepted; shell
+commands, package URLs and Dockerfile fragments are rejected.
 
-Browser-oriented presets also expose a disposable compatibility path at
-`/workspace/runtime`: `venv` links to the image's Python environment and
-`browsers` links to the preinstalled Playwright browser directory. It is a
-tmpfs mount for the current container, so it does not create or retain a
-`runtime/` directory in the host workspace. This supports Skills that expect
-`/workspace/runtime/venv/bin/python` and
-`PLAYWRIGHT_BROWSERS_PATH=/workspace/runtime/browsers`.
-
-The runner also mounts a generated, read-only `AGENTS.md` for the session. It
-describes whether the runtime comes from the environment image or a managed
-read-only runtime, lists the prepared entries, and tells the agent to reuse it
-instead of downloading dependencies again. The generated file is temporary and
-does not modify the host workspace's `AGENTS.md`.
+Records are stored under `~/.isolated-harness/environments/`, or under
+`ISOLATED_HARNESS_STATE_ROOT` if configured. Executable image layers and build
+caches live in Docker storage, outside the project. Do not mount a host's agent
+home to share a runtime.
 
 ## Reuse a runtime produced by a workspace
 
-When an agent has already assembled a Linux runtime in a workspace, import it
-once as a managed artifact and mount it read-only into later workspaces. The
-artifact keeps the compatible `/workspace/runtime` container path, which also
-preserves virtual-environment symlinks that use that absolute path.
+This is an advanced migration/override path, not a second required setup step:
 
 ```sh
-isolated-harness runtime import --name drawing-runtime --source /path/to/workspace/runtime
-isolated-harness codex --workspace /path/to/new-project --environment drawing-review-v1 --runtime drawing-runtime
+isolated-harness runtime import --name drawing-runtime --source /path/to/old-project/runtime
+isolated-harness codex --workspace /path/to/new-project \
+  --environment drawing-review-v1 --runtime drawing-runtime
 ```
 
-The `--runtime` option is an override, not a requirement. Omitting it uses the
-Python, Playwright and browser runtime already bundled in `drawing-review-v1`.
+Imports live under `~/.isolated-harness/runtimes/<name>`. They preserve Linux
+`python`, `venv`, `browsers` and optional helper directories. Mutable `cache/`
+is omitted unless `--with-cache` is supplied. New imports hash file contents,
+executable modes and symlink targets; same-size edits change the digest. An
+identical reimport is idempotent; different content requires a new name so
+existing projects keep their artifact. Existing manifests remain readable.
 
-## Verify a prepared environment
+An explicitly selected managed runtime takes precedence for Python, `PATH`,
+and browsers. It can therefore lack packages declared by the environment;
+its compatibility is the owner's responsibility. Normal launches should omit
+`--runtime` and use the environment's verified dependency set.
 
-Before opening an agent session, verify the selected environment with an
-offline probe:
+`--runtime-write` is retained for deliberate maintenance. It serializes
+**writers only**; it does not exclude existing readers. A writable shared
+runtime can affect other sessions, and its import digest is a snapshot, not
+continuous integrity monitoring. Use a new named import for reproducible work.
 
-```sh
-isolated-harness environment verify drawing-review-v1
-```
+`environment build --preset drawing-review --runtime-source <managed-directory>`
+can seed browser downloads from an old artifact. Fresh builds copy only the
+browser seed and prepare the declared Python packages; they do not copy an
+entire second Python runtime. Legacy image reuse preserves existing layers
+and disk size. It does not retroactively remove duplicated data from old
+images.
 
-The probe starts the same read-only container contract used by a session with
-network disabled. It checks the `/workspace/runtime` links, imports every
-Python dependency declared by the environment, and checks that the requested
-Playwright browser directory is available. It does not install packages,
-download a browser, or create a `runtime/` directory in the host workspace.
-
-`environment prebuild` also preserves a matching managed runtime that was
-previously baked into an environment, rather than silently rebuilding without
-that local artifact.
-That is the normal path and reuses the locally built Docker image without
-downloading dependencies for each workspace.
-
-To bake an existing managed runtime into a new environment image once, build
-the environment with `--runtime-source`:
-
-```sh
-isolated-harness environment build \
-  --preset drawing-review \
-  --runtime-source /path/to/managed-runtime
-```
-
-The runtime is copied into the image during that one local build. Later
-projects use only `--environment drawing-review-v1`; they do not need a separate
-runtime name or another dependency download.
-
-The default import retains executable runtime entries such as `browsers`,
-`python`, `venv`, `uv-arm`, and `uv-wheel`, but deliberately omits a mutable
-download `cache/`. Pass `--with-cache` only when that cache is needed for a
-separate build workflow. Managed runtime artifacts are Linux-container assets,
-not macOS executables; they are mounted read-only and are never copied into the
-new project's workspace. A small tmpfs overlay records Playwright's local
-installation link while the imported browser binaries remain read-only; an
-idempotent `playwright install chromium` therefore reuses the browser without
-redownloading it.
-
-### Explicit shared-runtime writes
-
-The default is read-only because a managed runtime may be shared by many
-projects. When a dependency genuinely needs to be added to that shared runtime,
-the owner can opt into a serialized writable session:
-
-```sh
-isolated-harness codex \
-  --workspace /path/to/project \
-  --environment drawing-review-v1 \
-  --runtime drawing-runtime \
-  --runtime-write
-```
-
-`--runtime-write` only changes the managed runtime mount to read/write. It does
-not make the Docker image mutable, and it refuses to start while another
-writable session holds the runtime lock. Use it for deliberate environment
-maintenance, then import or snapshot a new named runtime for reproducible work.
-Normal sessions should continue using the default read-only mode.
-
-## Bundled environments
-
-The package includes four reviewed presets. They are ordinary local Docker
-images: build each one once, then select it by name for any number of isolated
-workspaces. No subsequent chat downloads those dependencies into its
-workspace.
-
-| Preset | Includes |
-| --- | --- |
-| `python-analysis` | Python, `jsonschema`, `numpy`, and `sympy` |
-| `document-review` | Poppler, NSS, Pillow, and PyMuPDF |
-| `browser-review` | Python Playwright and Chromium |
-| `drawing-review` | Document-review tools, numerical libraries, Playwright, and Chromium |
-
-```sh
-isolated-harness environment presets
-isolated-harness environment prebuild python-analysis document-review browser-review drawing-review
-
-# Or build just one preset.
-isolated-harness environment build --preset drawing-review
-```
-
-`environment prebuild` is idempotent from a dependency perspective: Docker
-reuses matching layers and a completed image. It is safe to run again after an
-image update. Docker images are platform-specific and are therefore built on
-the user's machine rather than shipped as large binaries in the npm package.
-
-When the base Codex image changes, rebuild every environment you use. An
-environment is derived from the base image at its build time, so updating only
-`codex-cli:local` does not alter an already-built `drawing-review-v1` image.
-For example:
-
-```sh
-isolated-harness image build --codex-version 0.155.0
-isolated-harness environment prebuild drawing-review
-```
-
-## Build and select
-
-```sh
-isolated-harness environment build --spec examples/drawing-review.environment.json
-isolated-harness environment list
-isolated-harness codex --workspace /path/to/project --environment drawing-review-v1
-```
-
-The build record is stored under `~/.isolated-harness/environments/`. It records
-the resolved image tag and a digest of the specification. The workspace keeps
-only project data and project-owned Codex state; environment dependencies never
-need to be downloaded into `.tools/`.
-
-## Reset or rebuild
+## Reset and TLS
 
 ```sh
 isolated-harness environment reset drawing-review-v1
-isolated-harness environment build --spec examples/drawing-review.environment.json
+isolated-harness environment build --preset drawing-review
 ```
 
-`reset` removes the named local Docker image and its environment record. It
-fails while Docker considers the image in use, rather than forcibly disrupting
-a running agent.
+Reset removes the selected environment tag and record without forcibly
+interrupting running containers. Dependency snapshot tags and build caches may
+still hold shared layers; reset is not a promise to reclaim all disk space.
 
-## TLS and package indexes
-
-For a proxy whose certificate is not trusted by the Linux base image, add an
-explicit machine-local PEM file to the specification:
-
-```json
-{
-  "version": "v1",
-  "name": "drawing-review-with-proxy-ca",
-  "baseImage": "codex-cli:local",
-  "trustedCaFile": "/absolute/path/to/proxy-ca.pem",
-  "pip": ["pymupdf"]
-}
-```
-
-The certificate is copied into the **local environment image** and registered
-with Debian's CA store during the build. When macOS proxy settings are detected
-and no explicit file is supplied, Isolated Harness uses the host's public trust
-bundle for this local build. Do not publish or share an image that contains an
-organization-private certificate. The image enables
-`UV_SYSTEM_CERTS=true`, so uv reads the Linux system store. uv can alternatively
-use an explicit `SSL_CERT_FILE` PEM bundle for a single run.
-For an environment such as `drawing-review-v1`, `/workspace/runtime` is a
-container tmpfs containing links to the prepared image environment. It is not
-a directory in the host workspace. The environment's declared Python packages
-and Playwright browsers take precedence over an older bundled runtime, so a
-previous project cannot silently remove a dependency such as NumPy from a new
-agent session. An explicitly selected `--runtime` remains the deliberate
-override.
+For a private proxy CA, set `trustedCaFile` to an absolute PEM file in the spec.
+Otherwise detected macOS proxy settings use the host's public trust bundle.
+The local image records a content digest of the bundle and installs it into the
+Linux trust store. Do not publish an image containing an organization-private
+CA. `UV_SYSTEM_CERTS=true` makes uv use that store.

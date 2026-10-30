@@ -1,9 +1,30 @@
 # Isolated Harness — Implementation Status
 
 Status: **Active implementation record**  
-Last updated: **2026-09-18**
+Last updated: **2026-10-29**
 
 ## Implemented
+
+- Automatic Harness program releases are independent of fallback images and
+  runtime dependencies. Startup/hourly checks, the in-container `codex update`
+  and npm upgrade routes, and generic `harness-update` share a serialized,
+  verified release store. Offline and pinned sessions stay fixed.
+- Generic npm harness registration/launch is available, including Claude Code
+  with its own project home. The specialized JSONL batch adapter remains Codex.
+- A private file-based update broker exposes only the selected registered
+  package/version operation. Sessions mount program releases read-only and
+  never receive the Docker socket or host runner configuration.
+
+
+- One-command `image update` resolves npm's latest stable Codex version and
+  updates registered environments while retaining independent dependency
+  snapshots. Environment identities record the actual base image ID.
+- Prepared toolsets share local Docker layers and build-only pip/browser
+  download caches. All presets expose the same temporary runtime path.
+- Environment promotion requires an offline Python-import/browser-launch/
+  Codex-version probe. Failed replacements retain the previous selected image.
+- Imported runtimes use content digests and require new names for changed
+  artifacts. Managed overrides also set the matching Python `PATH`.
 
 - Versioned JSON `RunSpec`, preflight, non-mutating Docker plan, image build,
   and streamed `run` lifecycle for the `codex-cli` adapter.
@@ -33,6 +54,22 @@ Last updated: **2026-09-18**
   a private temporary file mount.
 
 ## Live acceptance evidence
+
+Automatic-upgrade acceptance: the container's npm upgrade route upgraded an
+existing Codex CLI `0.153.4` installation to `0.165.0`; the new version ran in
+the same container, and the previous release still ran afterward. Claude Code
+`2.1.312` installed through the generic launcher and reported its version.
+These checks exercised program installation/upgrade without model calls.
+
+On 2026-10-29, the base and all four registered environments were upgraded to
+Codex CLI `0.165.0`. Offline probes imported their declared Python packages
+and launched the browser in both browser presets. The stronger probe found
+and repaired a missing browser revision in the drawing environment. Two
+temporary project sessions opened the prepared drawing environment offline,
+reported the new Codex version, and left no runtime copy in either workspace.
+Unchanged prebuilds reused the selected local images.
+
+### Initial model-run evidence (2026-09-18)
 
 Docker Desktop `28.2.2` and an isolated image containing `codex-cli 0.155.0`
 were used for an end-to-end run. The agent received a host-login projection,
